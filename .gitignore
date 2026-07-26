@@ -1,0 +1,14 @@
+# Python (firmware bridge)
+__pycache__/
+*.pyc
+firmware/bridge/queue.jsonl
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+
+# Nested repo — has its own .git, not part of this repo
+/LockerwithFirmware/
+
+# Laravel subtree is covered by laravel/.gitignore (vendor/, .env, etc.)

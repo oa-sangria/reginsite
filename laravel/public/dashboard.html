@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard — Reginsite</title>
+  <link rel="stylesheet" href="assets/css/styles.css" />
+</head>
+<body data-page="dashboard">
+  <div class="layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="main">
+      <header class="topbar" id="topbar"></header>
+      <div class="content">
+        <div class="hero">
+          <div class="hero-text">
+            <h2 class="hero-title">Welcome back, Administrator</h2>
+            <p class="hero-sub">Live overview of tools, lockers, and student activity.</p>
+          </div>
+          <div class="hero-actions">
+            <a class="btn btn-ghost btn-sm" href="terms.html">Terms &amp; Conditions</a>
+            <a class="btn btn-primary btn-sm" href="inventory.html">+ Manage Inventory</a>
+          </div>
+        </div>
+
+        <div class="kpi-grid" id="kpis"></div>
+
+        <div class="dash-grid">
+          <div class="dash-col">
+            <div class="card">
+              <div class="card-head">
+                <h2>Locker Map</h2>
+                <span class="hint" id="lockerLegend"></span>
+              </div>
+              <div class="card-body"><div class="locker-grid" id="lockerMap"></div></div>
+            </div>
+          </div>
+          <div class="dash-col">
+            <div class="card">
+              <div class="card-head"><h2>Tool Inventory</h2><span class="hint" id="invTotal"></span></div>
+              <div class="card-body" id="inventoryBreakdown"></div>
+            </div>
+            <div class="card">
+              <div class="card-head"><h2>Alerts</h2><span class="count-pill" id="alertCount"></span></div>
+              <div class="card-body" id="alerts"></div>
+            </div>
+            <div class="card">
+              <div class="card-head"><h2>Recent Activity</h2><a class="hint" href="transactions.html">View all →</a></div>
+              <div class="card-body"><div class="feed" id="feed"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="assets/js/api.js"></script>
+  <script src="assets/js/app.js"></script>
+  <script src="assets/js/dashboard.js"></script>
+  <script>App.init(renderDashboard);</script>
+</body>
+</html>

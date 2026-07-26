@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Locker Terminal — Reginsite</title>
+  <link rel="stylesheet" href="assets/css/styles.css" />
+</head>
+<body class="term-body">
+  <div class="term-shell">
+    <header class="term-top">
+      <div class="term-brand">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M18 8h-1V6A5 5 0 0 0 7 6v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zM9 6a3 3 0 0 1 6 0v2H9V6zm3 11a2 2 0 1 1 0-4 2 2 0 0 1 0 4z"/>
+        </svg>
+        <span>Smart Tool Locker — Terminal</span>
+      </div>
+      <div class="term-meta">
+        <span class="badge badge-warn">SIMULATOR</span>
+        <span id="termClock"></span>
+      </div>
+    </header>
+
+    <main class="term-stage" id="stage"><!-- screens rendered by terminal.js --></main>
+
+    <footer class="term-foot">
+      Simulates the ESP32 locker terminal using the same API the hardware will use ·
+      <a href="index.html">Admin site</a>
+    </footer>
+  </div>
+
+  <script src="assets/js/terminal.js"></script>
+</body>
+</html>
