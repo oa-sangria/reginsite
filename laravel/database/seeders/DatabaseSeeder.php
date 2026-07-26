@@ -55,17 +55,20 @@ class DatabaseSeeder extends Seeder
             ]);
         }
 
+        // Lockers 1-4 are the physical test cabinet: all present/available so a
+        // scan on any of them starts as a clean BORROW. The demo variety
+        // (borrowed/overdue/offline) lives on lockers 5-10.
         $lockers = [
-            ['Locker 1',  'online',  'removed', 'red'],
+            ['Locker 1',  'online',  'present', 'green'],
             ['Locker 2',  'online',  'present', 'green'],
-            ['Locker 3',  'offline', 'present', 'off'],
+            ['Locker 3',  'online',  'present', 'green'],
             ['Locker 4',  'online',  'present', 'green'],
             ['Locker 5',  'online',  'removed', 'red'],
             ['Locker 6',  'online',  'removed', 'red'],
-            ['Locker 7',  'online',  'present', 'green'],
+            ['Locker 7',  'online',  'removed', 'red'],
             ['Locker 8',  'online',  'removed', 'red'],
             ['Locker 9',  'online',  'present', 'off'],
-            ['Locker 10', 'online',  'present', 'green'],
+            ['Locker 10', 'offline', 'present', 'off'],
         ];
         foreach ($lockers as $l) {
             Locker::create([
@@ -74,14 +77,15 @@ class DatabaseSeeder extends Seeder
             ]);
         }
 
+        // Tools 1-4 available (physical test lockers). Borrowed demo on 5-8.
         $tools = [
-            ['Long-nose Plier',    'RFID-A1',  1,  'borrowed'],
+            ['Long-nose Plier',    'RFID-A1',  1,  'available'],
             ['Combination Plier',  'RFID-A2',  2,  'available'],
             ['Vernier Caliper',    'RFID-A3',  3,  'available'],
             ['Screwdriver Set',    'RFID-A4',  4,  'available'],
             ['Digital Multimeter', 'RFID-A5',  5,  'borrowed'],
             ['Soldering Iron',     'RFID-A6',  6,  'borrowed'],
-            ['Wire Stripper',      'RFID-A7',  7,  'available'],
+            ['Wire Stripper',      'RFID-A7',  7,  'borrowed'],
             ['Claw Hammer',        'RFID-A8',  8,  'borrowed'],
             ['Adjustable Wrench',  'RFID-A9',  9,  'maintenance'],
             ['Hex Key Set',        'RFID-A10', 10, 'available'],
@@ -106,16 +110,17 @@ class DatabaseSeeder extends Seeder
                 'return_time' => $return, 'status' => $status,
             ]);
         };
-        // Active
-        $mk(1, 1, 1, 72, null);   // Regina — overdue 3 days (banned)
-        $mk(2, 5, 5, 2, null);    // Mark — on time
-        $mk(6, 6, 6, 9, null);    // Carlo — overdue (>8h)
-        $mk(4, 8, 8, 1, null);    // Joshua — on time
-        // Returned today
+        // Active borrows (tools 5-8, so test lockers 1-4 stay free).
+        // tx #1 must be Regina's overdue borrow (the Ban row references it).
+        $mk(1, 6, 6, 72, null);   // Regina  — tool 6, overdue 3 days (banned)
+        $mk(2, 5, 5, 2, null);    // Mark    — tool 5, on time
+        $mk(6, 7, 7, 9, null);    // Carlo   — tool 7, overdue (>8h)
+        $mk(4, 8, 8, 1, null);    // Joshua  — tool 8, on time
+        // Returned today (closed rows on the now-available tools 1-4)
         $mk(3, 3, 3, 28, 5);
         $mk(5, 4, 4, 48, 4);
-        $mk(7, 7, 7, 5, 1);
-        $mk(4, 4, 4, 12, 3);
+        $mk(7, 2, 2, 5, 1);
+        $mk(4, 1, 1, 12, 3);
         // Older history
         $mk(8, 2, 2, 96, 72);
         $mk(2, 9, 9, 144, 120);

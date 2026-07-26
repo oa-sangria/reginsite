@@ -1,160 +1,213 @@
 /* ============================================================================
    reginsite — Locker Controller firmware  (Arduino Mega 2560)
+   4-locker smart tool cabinet · RFID borrow/return toggle
    ----------------------------------------------------------------------------
-   RFID borrow/return TOGGLE for a single solenoid locker (Locker 10).
+   Each tool has its own RFID tag. Scan a tag:
+       tool is IN  -> that locker UNLOCKS, logs a BORROW  (LED on)
+       tool is OUT -> that locker LOCKS,   logs a RETURN  (LED off)
 
-   Scan an RFID card  -> relay energizes the 12V solenoid (UNLOCK / borrow)
-   Scan the same card -> relay releases the solenoid    (LOCK / return)
+   The Mega has no network/clock, so it doesn't touch the database. It talks
+   over USB serial (115200) to bridge.py on the mini PC, which calls the
+   Laravel API. See firmware/README.md.
 
-   The Mega has no network + no clock, so it does NOT touch the database.
-   It talks over USB serial (115200 baud) to a bridge program on the mini PC,
-   which calls the Laravel API. See firmware/README.md.
+   Ultrasonic sensors are read + printed for monitoring but do NOT gate the
+   borrow/return logic yet (that's the next step).
 
-   --- Wiring -----------------------------------------------------------------
-   RC522 RFID reader        Arduino Mega
-     SDA / SS ............. D53
-     SCK ................. D52   (hardware SPI)
-     MOSI ................ D51   (hardware SPI)
-     MISO ................ D50   (hardware SPI)
-     RST ................. D9
-     VCC ................. 3.3V   (NOT 5V)
-     GND ................. GND
+   --- Pins (your wiring) -----------------------------------------------------
+   RC522:  SS/SDA=53  SCK=52  MOSI=51  MISO=50  RST=9   VCC=3.3V  GND=GND
+                        Locker1  Locker2  Locker3  Locker4
+     Relay ............   22       23       24       25
+     LED ..............   26       27       28       38
+     Ultrasonic TRIG ..   30       32       34       36
+     Ultrasonic ECHO ..   29       33       35       37
 
-   Relay module (Locker 10)  Arduino Mega
-     IN .................. D31
-     VCC / GND ........... 5V / GND
-     COM / NO ............ switches the 12V brick to the solenoid
-
-   --- Libraries --------------------------------------------------------------
-   SPI      (bundled with the Arduino IDE)
-   MFRC522  (Library Manager: "MFRC522" by GithubCommunity)
-
-   --- Serial protocol (Mega -> PC) -------------------------------------------
-   READY                       on boot
-   SCAN,<uid>                  a card was read (uid = hex, no spaces)
-   EVENT,OPEN,<uid>            lock just opened  -> bridge should BORROW
-   EVENT,CLOSE,<uid>           lock just closed  -> bridge should RETURN
-
-   --- Serial protocol (PC -> Mega) -------------------------------------------
-   ACK                         DB write succeeded  (LED double-blink)
-   NAK,<msg>                   DB write failed     (LED triple-blink; lock NOT reversed)
+   --- Serial protocol --------------------------------------------------------
+   Mega -> PC:  READY
+                SCAN,<uid>                    a known tag was read
+                UNKNOWN,<uid>                 tag not in the table below
+                EVENT,OPEN,<locker>,<uid>     locker opened  -> bridge BORROWs
+                EVENT,CLOSE,<locker>,<uid>    locker closed  -> bridge RETURNs
+   PC -> Mega:  ACK                           DB write ok  (LED confirm blink)
+                NAK,<msg>                      DB write failed (LED error blink)
    ============================================================================ */
 
 #include <SPI.h>
 #include <MFRC522.h>
 
-/* ---- Pins ---------------------------------------------------------------- */
-#define RST_PIN   9
-#define SS_PIN    53
-#define STATUS_LED 13          // onboard LED mirrors lock state (on = open)
-
-// Relay input pins, one per locker. Only Locker 10 (D31) is wired for now;
-// add more pins here to grow to more lockers later.
-const uint8_t RELAY_PINS[] = { 31 };
-const uint8_t LOCKER_COUNT = sizeof(RELAY_PINS) / sizeof(RELAY_PINS[0]);
-
-/* Most cheap relay boards are ACTIVE-LOW (LOW = energized). If your solenoid
-   opens when it should close, flip this to false. */
-#define RELAY_ACTIVE_LOW true
-
-/* How long to ignore repeat reads of the same card, in ms. */
-#define SCAN_COOLDOWN_MS 2000
-
+#define SS_PIN  53
+#define RST_PIN 9
 MFRC522 rfid(SS_PIN, RST_PIN);
 
-bool     lockOpen[LOCKER_COUNT];      // false = locked, true = unlocked
-String   lastUid = "";
-uint32_t lastScanMs = 0;
+/* ===========================================================================
+   >>> STEP 1: register your 4 tags here. <<<
+   Upload once with these blank, open Serial Monitor @115200, and tap each tag.
+   You'll see e.g.  UNKNOWN,DE AD BE EF   — copy that UID (uppercase, spaces ok)
+   into the slot for the locker that tag belongs to, then re-upload.
+   =========================================================================== */
+String tagUID[4] = {
+  "",   // Locker 1 tag
+  "",   // Locker 2 tag
+  "",   // Locker 3 tag
+  ""    // Locker 4 tag
+};
 
-/* ---- Relay helpers ------------------------------------------------------- */
-void relayWrite(uint8_t idx, bool energized) {
-  uint8_t level = RELAY_ACTIVE_LOW ? (energized ? LOW : HIGH)
-                                   : (energized ? HIGH : LOW);
-  digitalWrite(RELAY_PINS[idx], level);
+/* ---- Pins ---------------------------------------------------------------- */
+const byte relayPins[4] = { 22, 23, 24, 25 };
+const byte ledPins[4]   = { 26, 27, 28, 38 };
+const byte trigPins[4]  = { 30, 32, 34, 36 };
+const byte echoPins[4]  = { 29, 33, 35, 37 };
+
+/* ---- Settings ------------------------------------------------------------ */
+const bool  ACTIVE_LOW = true;              // your relay board is active-low
+const float TOOL_PRESENT_THRESHOLD = 8.0;   // cm (used by sensors, not yet in logic)
+const bool  DEBUG_DISTANCE = false;         // true = print sensor distances every 2s
+const unsigned long SCAN_COOLDOWN_MS = 2000;
+
+/* ---- State --------------------------------------------------------------- */
+bool lockerState[4] = { false, false, false, false };   // false = locked
+String lastUID = "";
+unsigned long lastScanMs = 0;
+unsigned long lastDistMs = 0;
+
+/* ---- Relay / LED --------------------------------------------------------- */
+void lockLocker(byte i) {
+  digitalWrite(relayPins[i], ACTIVE_LOW ? HIGH : LOW);   // de-energize = locked
+  digitalWrite(ledPins[i], LOW);
+  lockerState[i] = false;
+  Serial.print("Locker "); Serial.print(i + 1); Serial.println(" LOCKED");
+}
+void unlockLocker(byte i) {
+  digitalWrite(relayPins[i], ACTIVE_LOW ? LOW : HIGH);   // energize = unlocked
+  digitalWrite(ledPins[i], HIGH);
+  lockerState[i] = true;
+  Serial.print("Locker "); Serial.print(i + 1); Serial.println(" UNLOCKED");
 }
 
-void setLock(uint8_t idx, bool open) {
-  lockOpen[idx] = open;
-  relayWrite(idx, open);                 // open = solenoid energized = unlocked
-  if (idx == 0) digitalWrite(STATUS_LED, open ? HIGH : LOW);
+/* ---- Ultrasonic (monitoring only for now) -------------------------------- */
+float readDistance(byte s) {
+  digitalWrite(trigPins[s], LOW);  delayMicroseconds(2);
+  digitalWrite(trigPins[s], HIGH); delayMicroseconds(10);
+  digitalWrite(trigPins[s], LOW);
+  long duration = pulseIn(echoPins[s], HIGH, 30000);
+  if (duration == 0) return -1;
+  return duration * 0.0343 / 2.0;
 }
-
-/* ---- LED feedback -------------------------------------------------------- */
-void blink(uint8_t times, uint16_t ms) {
-  bool restore = lockOpen[0];
-  for (uint8_t i = 0; i < times; i++) {
-    digitalWrite(STATUS_LED, HIGH); delay(ms);
-    digitalWrite(STATUS_LED, LOW);  delay(ms);
+void printDistances() {
+  Serial.println("-------------- distances --------------");
+  for (byte i = 0; i < 4; i++) {
+    float d = readDistance(i);
+    Serial.print("Locker "); Serial.print(i + 1); Serial.print(" : ");
+    if (d < 0) Serial.println("No Echo");
+    else { Serial.print(d); Serial.println(" cm"); }
   }
-  digitalWrite(STATUS_LED, restore ? HIGH : LOW);
 }
 
-/* ---- Read the current card's UID as an uppercase hex string -------------- */
-String readUid() {
-  String uid = "";
+/* ---- UID helpers --------------------------------------------------------- */
+// Uppercase hex, space-separated, e.g. "DE AD BE EF"
+String uidString() {
+  String s = "";
   for (byte i = 0; i < rfid.uid.size; i++) {
-    if (rfid.uid.uidByte[i] < 0x10) uid += "0";
-    uid += String(rfid.uid.uidByte[i], HEX);
+    if (rfid.uid.uidByte[i] < 0x10) s += "0";
+    s += String(rfid.uid.uidByte[i], HEX);
+    if (i < rfid.uid.size - 1) s += " ";
   }
-  uid.toUpperCase();
-  return uid;
+  s.toUpperCase();
+  return s;
+}
+// Which locker (0..3) owns this UID, or -1 if unknown.
+int lockerForUID(const String &uid) {
+  for (byte i = 0; i < 4; i++)
+    if (tagUID[i].length() && tagUID[i] == uid) return i;
+  return -1;
 }
 
-/* ---- Handle replies coming back from the PC bridge ----------------------- */
+/* ---- LED feedback from the bridge (ACK/NAK) ------------------------------ */
+void blink(byte pin, byte times, int ms) {
+  for (byte i = 0; i < times; i++) {
+    digitalWrite(pin, HIGH); delay(ms);
+    digitalWrite(pin, LOW);  delay(ms);
+  }
+}
 void handleSerial() {
   while (Serial.available()) {
     String line = Serial.readStringUntil('\n');
     line.trim();
     if (line.length() == 0) continue;
-    if (line == "ACK")            blink(2, 90);   // saved OK
-    else if (line.startsWith("NAK")) blink(3, 220); // save failed
+    // Confirm on the most-recently-toggled locker's LED, then restore it.
+    int i = lockerForUID(lastUID);
+    byte pin = (i >= 0) ? ledPins[i] : LED_BUILTIN;
+    bool restore = (i >= 0) ? lockerState[i] : false;
+    if (line == "ACK")            blink(pin, 2, 90);
+    else if (line.startsWith("NAK")) blink(pin, 3, 200);
+    if (i >= 0) digitalWrite(pin, restore ? HIGH : LOW);
   }
 }
 
 /* ========================================================================== */
 void setup() {
   Serial.begin(115200);
-
-  pinMode(STATUS_LED, OUTPUT);
-  for (uint8_t i = 0; i < LOCKER_COUNT; i++) {
-    pinMode(RELAY_PINS[i], OUTPUT);
-    setLock(i, false);                   // start locked
-  }
+  Serial.println();
+  Serial.println("==========================================");
+  Serial.println(" SMART TOOL LENDING CABINET  (reginsite)");
+  Serial.println("==========================================");
 
   SPI.begin();
   rfid.PCD_Init();
+  Serial.print("RC522 Version : ");
+  rfid.PCD_DumpVersionToSerial();
+
+  for (byte i = 0; i < 4; i++) {
+    pinMode(relayPins[i], OUTPUT);
+    pinMode(ledPins[i], OUTPUT);
+    pinMode(trigPins[i], OUTPUT);
+    pinMode(echoPins[i], INPUT);
+    lockLocker(i);                 // start locked
+  }
+  pinMode(LED_BUILTIN, OUTPUT);
 
   Serial.println("READY");
+  Serial.println("Waiting for RFID tag...");
 }
 
 void loop() {
   handleSerial();
 
-  // Nothing new on the reader? bail out cheaply.
+  if (DEBUG_DISTANCE && millis() - lastDistMs > 2000) {
+    lastDistMs = millis();
+    printDistances();
+  }
+
   if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
 
-  String uid = readUid();
-  uint32_t now = millis();
+  String uid = uidString();
+  unsigned long now = millis();
 
-  // Debounce: ignore the same card presented again within the cooldown window.
-  if (uid == lastUid && (now - lastScanMs) < SCAN_COOLDOWN_MS) {
-    rfid.PICC_HaltA();
+  // Debounce the same tag held on the reader.
+  if (uid == lastUID && (now - lastScanMs) < SCAN_COOLDOWN_MS) {
+    rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
     return;
   }
-  lastUid = uid;
+  lastUID = uid;
   lastScanMs = now;
 
-  Serial.print("SCAN,");
-  Serial.println(uid);
+  int i = lockerForUID(uid);
+  if (i < 0) {
+    // Unknown tag: print it so you can register it in tagUID[] above.
+    Serial.print("UNKNOWN,"); Serial.println(uid);
+    rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
+    return;
+  }
 
-  // Single-locker toggle for now (index 0 = Locker 10 on D31).
-  uint8_t idx = 0;
-  bool nowOpen = !lockOpen[idx];
-  setLock(idx, nowOpen);
+  Serial.print("SCAN,"); Serial.println(uid);
 
-  // Tell the bridge which way we just went so it can borrow/return.
+  bool willOpen = !lockerState[i];
+  if (willOpen) unlockLocker(i); else lockLocker(i);
+
+  // Tell the bridge: OPEN -> borrow, CLOSE -> return.
   Serial.print("EVENT,");
-  Serial.print(nowOpen ? "OPEN," : "CLOSE,");
+  Serial.print(willOpen ? "OPEN," : "CLOSE,");
+  Serial.print(i + 1);            // 1-based locker number
+  Serial.print(",");
   Serial.println(uid);
 
   rfid.PICC_HaltA();

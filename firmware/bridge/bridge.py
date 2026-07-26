@@ -49,13 +49,20 @@ def load_config():
     if not cfg.read(CONFIG_PATH):
         sys.exit(f"Missing config file: {CONFIG_PATH}")
     b = cfg["bridge"]
+    # Parse "1:1, 2:2, ..." into {locker_number: tool_id}
+    locker_map = {}
+    for pair in b.get("locker_tool_map", "1:1,2:2,3:3,4:4").split(","):
+        pair = pair.strip()
+        if ":" in pair:
+            lk, tool = pair.split(":", 1)
+            locker_map[int(lk)] = int(tool)
     return {
         "port": b.get("serial_port", "COM4"),
         "baud": b.getint("baud_rate", 115200),
         "base_url": b.get("base_url", "http://localhost:8000").rstrip("/"),
         "api_key": b.get("api_key", "regin-esp32-2026"),
         "student_qr": b.get("test_student_qr", "QR-2026-0132"),
-        "tool_id": b.getint("tool_id", 10),
+        "locker_map": locker_map,
     }
 
 
@@ -88,11 +95,11 @@ def api_post(cfg, path, payload):
 # --------------------------------------------------------------------------- #
 #  Offline queue                                                               #
 # --------------------------------------------------------------------------- #
-def queue_event(kind, cfg, uid):
+def queue_event(kind, cfg, tool_id, uid):
     event = {
         "type": "borrow" if kind == "OPEN" else "return",
         "qr": cfg["student_qr"],
-        "tool_id": cfg["tool_id"],
+        "tool_id": tool_id,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "uid": uid,
     }
@@ -127,23 +134,29 @@ def flush_queue(cfg):
 # --------------------------------------------------------------------------- #
 #  Event handling                                                             #
 # --------------------------------------------------------------------------- #
-def handle_event(cfg, ser, kind, uid):
+def handle_event(cfg, ser, kind, locker, uid):
+    tool_id = cfg["locker_map"].get(locker)
+    if tool_id is None:
+        print(f"  -> locker {locker} not in locker_tool_map; ignoring")
+        ser.write(b"NAK,no mapping\n")
+        return
+
     action = "borrow" if kind == "OPEN" else "return"
-    payload = {"qr": cfg["student_qr"], "tool_id": cfg["tool_id"]}
+    payload = {"qr": cfg["student_qr"], "tool_id": tool_id}
     ok, data = api_post(cfg, action, payload)
 
     if ok:
         result = data.get("result", {})
-        print(f"  -> {action.upper()} saved. tx #{result.get('txId')} "
-              f"(tool {cfg['tool_id']}, {cfg['student_qr']})")
+        print(f"  -> Locker {locker}: {action.upper()} saved. tx #{result.get('txId')} "
+              f"(tool {tool_id}, {cfg['student_qr']})")
         ser.write(b"ACK\n")
     elif ok is None:
         # Offline: buffer and replay later.
-        queue_event(kind, cfg, uid)
+        queue_event(kind, cfg, tool_id, uid)
         ser.write(b"NAK,offline\n")
     else:
         # Server rejected (e.g. tool already borrowed / student blocked).
-        print(f"  -> {action.upper()} REJECTED: {data}")
+        print(f"  -> Locker {locker}: {action.upper()} REJECTED: {data}")
         ser.write(f"NAK,{data}\n".encode("utf-8"))
 
 
@@ -182,11 +195,12 @@ def main():
                 if line == "READY":
                     flush_queue(cfg)
                 elif line.startswith("EVENT,"):
+                    # EVENT,OPEN,<locker>,<uid>  or  EVENT,CLOSE,<locker>,<uid>
                     parts = line.split(",")
-                    if len(parts) >= 3:
-                        _, kind, uid = parts[0], parts[1], parts[2]
-                        handle_event(cfg, ser, kind, uid)
-                # SCAN,<uid> lines are informational only.
+                    if len(parts) >= 4:
+                        kind, locker, uid = parts[1], int(parts[2]), parts[3]
+                        handle_event(cfg, ser, kind, locker, uid)
+                # SCAN / UNKNOWN / distance lines are informational only.
         except serial.SerialException:
             print("  serial disconnected -- reopening...")
             try:
