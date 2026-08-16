@@ -1,26 +1,19 @@
 #!/usr/bin/env python3
 """
-reginsite - Serial -> API bridge (runs on the mini PC)
+reginsite - Locker Bridge (headless)  ·  SCREEN-DRIVEN
 ======================================================
-Reads borrow/return events from the Arduino Mega over USB serial and writes
-them to the database through the Laravel device API. This is what actually
-"saves to the database" -- the Mega has no network, so the mini PC does it.
+Middleman between the server and the Arduino on the mini PC.
 
-Flow:
-    Arduino Mega --(USB serial)--> THIS bridge --(HTTP)--> Laravel --> MySQL
+    touchscreen -> Laravel -> (command queue) -> THIS bridge -> Arduino
+    Arduino -> THIS bridge -> Laravel (confirm) -> MySQL
 
-Serial protocol (from the sketch):
-    READY
-    SCAN,<uid>
-    EVENT,OPEN,<uid>    -> POST /api/esp32/borrow
-    EVENT,CLOSE,<uid>   -> POST /api/esp32/return
-We reply to the Mega with 'ACK' on success or 'NAK,<msg>' on failure.
+Loop:
+  * Poll  GET /api/esp32/commands  -> for each, send  OPEN,<locker>,<mode>  to the Mega.
+  * Read the Mega:  DONE,<locker>,<uid>  -> POST /api/esp32/confirm {command_id, uid}
+                    TIMEOUT,<locker>     -> POST /api/esp32/confirm {command_id, timeout:true}
 
-Offline safety net: if the server is unreachable, the event is appended to
-queue.jsonl and replayed via /api/esp32/sync once the server is back.
-
-Dependencies:  pip install pyserial      (HTTP uses the Python standard library)
-Config:        bridge/config.ini
+Deps:  pip install pyserial          (HTTP via the standard library)
+Config: bridge/config.ini  (serial_port, base_url, api_key)
 """
 
 import configparser
@@ -32,177 +25,104 @@ import urllib.error
 import urllib.request
 
 try:
-    import serial  # pyserial
+    import serial
 except ImportError:
     sys.exit("pyserial is not installed. Run:  pip install pyserial")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.ini")
-QUEUE_PATH = os.path.join(HERE, "queue.jsonl")
+POLL_EVERY = 1.0        # seconds between command polls
 
 
-# --------------------------------------------------------------------------- #
-#  Config                                                                      #
-# --------------------------------------------------------------------------- #
 def load_config():
     cfg = configparser.ConfigParser()
     if not cfg.read(CONFIG_PATH):
         sys.exit(f"Missing config file: {CONFIG_PATH}")
     b = cfg["bridge"]
-    # Parse "1:1, 2:2, ..." into {locker_number: tool_id}
-    locker_map = {}
-    for pair in b.get("locker_tool_map", "1:1,2:2,3:3,4:4").split(","):
-        pair = pair.strip()
-        if ":" in pair:
-            lk, tool = pair.split(":", 1)
-            locker_map[int(lk)] = int(tool)
     return {
-        "port": b.get("serial_port", "COM4"),
+        "port": b.get("serial_port", "COM3"),
         "baud": b.getint("baud_rate", 115200),
         "base_url": b.get("base_url", "http://localhost:8000").rstrip("/"),
         "api_key": b.get("api_key", "regin-esp32-2026"),
-        "student_qr": b.get("test_student_qr", "QR-2026-0132"),
-        "locker_map": locker_map,
     }
 
 
-# --------------------------------------------------------------------------- #
-#  HTTP (stdlib only)                                                          #
-# --------------------------------------------------------------------------- #
-def api_post(cfg, path, payload):
-    """POST JSON to the device API. Returns (ok: bool, data: dict|str)."""
+def api(cfg, method, path, payload=None):
+    """Call the device API. Returns (ok, data|error)."""
     url = f"{cfg['base_url']}/api/esp32/{path}"
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=body, method="POST")
-    req.add_header("Content-Type", "application/json")
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
     req.add_header("X-API-Key", cfg["api_key"])
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=6) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return True, data
+            return True, json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        # Server answered but rejected it (e.g. tool unavailable, bad key).
         try:
-            data = json.loads(e.read().decode("utf-8"))
-            return False, data.get("error", f"HTTP {e.code}")
+            return False, json.loads(e.read().decode("utf-8")).get("error", f"HTTP {e.code}")
         except Exception:
             return False, f"HTTP {e.code}"
     except (urllib.error.URLError, ConnectionError, OSError) as e:
-        # Could not reach the server at all -> treat as offline.
-        return None, str(e)  # None == offline (queue it)
+        return None, str(e)
 
 
-# --------------------------------------------------------------------------- #
-#  Offline queue                                                               #
-# --------------------------------------------------------------------------- #
-def queue_event(kind, cfg, tool_id, uid):
-    event = {
-        "type": "borrow" if kind == "OPEN" else "return",
-        "qr": cfg["student_qr"],
-        "tool_id": tool_id,
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "uid": uid,
-    }
-    with open(QUEUE_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(event) + "\n")
-    print(f"  [queued offline] {event['type']} tool {event['tool_id']}")
-
-
-def flush_queue(cfg):
-    """Replay queued events through /api/esp32/sync. No-op if queue is empty."""
-    if not os.path.exists(QUEUE_PATH) or os.path.getsize(QUEUE_PATH) == 0:
-        return
-    events = []
-    with open(QUEUE_PATH, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                events.append(json.loads(line))
-    if not events:
-        return
-
-    ok, data = api_post(cfg, "sync", {"events": events})
-    if ok:
-        results = data.get("results", [])
-        good = sum(1 for r in results if r.get("ok"))
-        print(f"  [sync] flushed {good}/{len(events)} queued event(s)")
-        os.remove(QUEUE_PATH)   # clear once accepted
-    else:
-        print(f"  [sync] server not ready, keeping queue ({data})")
-
-
-# --------------------------------------------------------------------------- #
-#  Event handling                                                             #
-# --------------------------------------------------------------------------- #
-def handle_event(cfg, ser, kind, locker, uid):
-    tool_id = cfg["locker_map"].get(locker)
-    if tool_id is None:
-        print(f"  -> locker {locker} not in locker_tool_map; ignoring")
-        ser.write(b"NAK,no mapping\n")
-        return
-
-    action = "borrow" if kind == "OPEN" else "return"
-    payload = {"qr": cfg["student_qr"], "tool_id": tool_id}
-    ok, data = api_post(cfg, action, payload)
-
-    if ok:
-        result = data.get("result", {})
-        print(f"  -> Locker {locker}: {action.upper()} saved. tx #{result.get('txId')} "
-              f"(tool {tool_id}, {cfg['student_qr']})")
-        ser.write(b"ACK\n")
-    elif ok is None:
-        # Offline: buffer and replay later.
-        queue_event(kind, cfg, tool_id, uid)
-        ser.write(b"NAK,offline\n")
-    else:
-        # Server rejected (e.g. tool already borrowed / student blocked).
-        print(f"  -> Locker {locker}: {action.upper()} REJECTED: {data}")
-        ser.write(f"NAK,{data}\n".encode("utf-8"))
-
-
-# --------------------------------------------------------------------------- #
-#  Main loop                                                                   #
-# --------------------------------------------------------------------------- #
 def main():
     cfg = load_config()
-    print("reginsite bridge")
+    print("reginsite bridge (screen-driven)")
     print(f"  serial : {cfg['port']} @ {cfg['baud']}")
-    print(f"  server : {cfg['base_url']}  (tool_id={cfg['tool_id']}, student={cfg['student_qr']})")
+    print(f"  server : {cfg['base_url']}")
+
+    outstanding = {}   # locker_number -> command_id awaiting DONE/TIMEOUT
 
     while True:
         try:
-            ser = serial.Serial(cfg["port"], cfg["baud"], timeout=1)
+            ser = serial.Serial(cfg["port"], cfg["baud"], timeout=0.2)
         except serial.SerialException as e:
-            print(f"  cannot open {cfg['port']}: {e}  -- retrying in 3s "
-                  f"(is the Mega plugged in / Serial Monitor closed?)")
+            print(f"  cannot open {cfg['port']}: {e}  — retry in 3s (Arduino plugged in? Serial Monitor closed?)")
             time.sleep(3)
             continue
 
-        print(f"  connected to {cfg['port']}. Waiting for scans... (Ctrl+C to stop)")
-        time.sleep(2)          # let the board reset after the port opens
-        flush_queue(cfg)       # push anything buffered while we were down
+        print(f"  connected to {cfg['port']}. Waiting... (Ctrl+C to stop)")
+        time.sleep(2)
+        last_poll = 0
 
         try:
             while True:
-                raw = ser.readline()
-                if not raw:
-                    continue
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                print(f"[mega] {line}")
+                # --- read anything the Mega said -----------------------------
+                line = ser.readline().decode("utf-8", errors="replace").strip()
+                if line:
+                    print(f"[mega] {line}")
+                    if line.startswith("DONE,"):
+                        _, locker, uid = (line.split(",", 2) + ["", ""])[:3]
+                        cid = outstanding.pop(int(locker), None) if locker.isdigit() else None
+                        if cid:
+                            ok, data = api(cfg, "POST", "confirm", {"command_id": cid, "uid": uid})
+                            if ok:
+                                r = data.get("result", {})
+                                print(f"  -> {data.get('action','?').upper()} saved: {data.get('tool')} (tx #{r.get('txId')})")
+                            else:
+                                print(f"  -> confirm failed: {data}")
+                    elif line.startswith("TIMEOUT,"):
+                        locker = line.split(",", 1)[1]
+                        cid = outstanding.pop(int(locker), None) if locker.isdigit() else None
+                        if cid:
+                            api(cfg, "POST", "confirm", {"command_id": cid, "timeout": True})
+                            print(f"  -> locker {locker} timed out; cancelled.")
 
-                if line == "READY":
-                    flush_queue(cfg)
-                elif line.startswith("EVENT,"):
-                    # EVENT,OPEN,<locker>,<uid>  or  EVENT,CLOSE,<locker>,<uid>
-                    parts = line.split(",")
-                    if len(parts) >= 4:
-                        kind, locker, uid = parts[1], int(parts[2]), parts[3]
-                        handle_event(cfg, ser, kind, locker, uid)
-                # SCAN / UNKNOWN / distance lines are informational only.
+                # --- poll the server for new OPEN commands -------------------
+                if time.time() - last_poll >= POLL_EVERY:
+                    last_poll = time.time()
+                    ok, data = api(cfg, "GET", "commands")
+                    if ok:
+                        for c in data.get("commands", []):
+                            locker = c.get("lockerId")
+                            mode = c.get("mode", "borrow")
+                            ser.write(f"OPEN,{locker},{mode}\n".encode("utf-8"))
+                            outstanding[int(locker)] = c["id"]
+                            print(f"  <- OPEN locker {locker} ({mode}) [cmd {c['id']}]")
         except serial.SerialException:
-            print("  serial disconnected -- reopening...")
+            print("  serial disconnected — reopening...")
             try:
                 ser.close()
             except Exception:

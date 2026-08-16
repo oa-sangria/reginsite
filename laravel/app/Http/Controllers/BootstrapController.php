@@ -32,7 +32,10 @@ class BootstrapController extends Controller
                 'id' => (string) $s->id,
                 'studentId' => $s->student_no,
                 'name' => $s->name,
-                'strand' => $s->strand,
+                // Admin UI shows this column as "strand" — surface the major there.
+                'strand' => $s->major ?: $s->strand,
+                'program' => $s->program,
+                'major' => $s->major,
                 'qr' => $s->qr_code,
                 'status' => $s->status,
                 'bannedUntil' => $iso($s->banned_until),

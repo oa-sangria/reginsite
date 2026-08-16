@@ -1,7 +1,73 @@
 # reginsite — Session Handoff / Project Notes
 
 > Living doc so any agent/session can pick up where we left off. **Update this when you change things.**
-> Last updated: 2026-06-16 (session 4: **started Arduino firmware** in `firmware/` — RFID toggle → DB)
+> Last updated: 2026-06-16 (session 5: **screen-driven flow + real tool inventory + QR program gate**)
+
+## Session 5 — screen-driven system (current)
+Full hardware architecture locked in. Real parts: Dell mini PC (runs DB + Laravel + terminal UI +
+bridge), touchscreen, **USB QR scanner SM8070** (keyboard-wedge → types the student ID into the
+terminal page), Arduino Mega (10 lockers via 3× 4-ch relays, HC-SR04 ultrasonic, RC522 tool tags,
+buzzer + green LED).
+
+**Flow (screen-driven, verified server-side via curl):**
+1. Terminal: QR scanned → `POST /api/esp32/verify-student {qr}`. Server parses the QR text
+   (`Student No. / Full Name / Program`), auto-provisions the student, and **gates by program**:
+   only *Bachelor of Industrial Technology* majoring in **Electrical / Mechatronics / HVAC&R**
+   (see `app/Services/QrStudent.php`). Then the usual banned/overdue checks.
+2. Terminal: student accepts T&C, taps BORROW + a tool type → `POST /api/esp32/borrow-request
+   {student_no, locker_id}` → server queues an OPEN command (`device_commands` table).
+3. Bridge: `GET /api/esp32/commands` (polls) → sends `OPEN,<locker>,<mode>` to the Arduino.
+4. Arduino: unlocks locker, waits for **ultrasonic** to confirm removal + reads the tool's **RFID
+   tag**, replies `DONE,<locker>,<uid>` (or `TIMEOUT`).
+5. Bridge: `POST /api/esp32/confirm {command_id, uid}` → server finds the tool by that UID and
+   records the borrow of that specific instance. Return mirrors this.
+
+**Real inventory is seeded** (`database/seeders/DatabaseSeeder.php`): 9 tool types, one locker
+each, RFID tag per tool, from the user's scans. UIDs stored NORMALIZED (no separators, uppercase);
+`Tool::findByTag()` / `Tool::normTag()` match any format (`AA:BB` or `AA BB`).
+- Plier 3/4 duplicate RESOLVED: Plier 3 = `93:0E:79:06`, Plier 4 = `25:F8:7A:06` (seeded).
+- ⚠ **Exposed device key still unrotated** in the public repo (GitGuardian). Rotate
+  `DEVICE_API_KEY` (`.env`) + `firmware/bridge/config.ini` `api_key` before the next public push.
+- **Buzzer is TEST-ONLY** (`BUZZER_ENABLED=false` in locker_controller.ino); the LED is the real
+  status indicator.
+- **Test sketches** in `firmware/tests/`: `relay_led_test` (map relay/LED pins + polarity),
+  `ultrasonic_test` (map echo pins + find PRESENT_CM), plus `firmware/rfid_read_test` (tag UIDs)
+  and `firmware/tests/qr_capture.html` (see exactly what the SM8070 types). Used to collect the
+  pin/threshold/QR-format data still needed to finish wiring.
+
+**New device endpoints** (all under `device.key`): `verify-student`, `borrow-request`,
+`return-request`, `commands` (GET), `confirm`, plus the originals `state`, `borrow`, `return`,
+`locker-status`, `sync`. Screen-driven uses request→commands→confirm; the immediate `borrow`/
+`return` (by tool_id) are kept for the simulator/tests.
+
+**Firmware** (`firmware/locker_controller/`): command-driven. Serial protocol —
+PC→Mega `OPEN,<locker>,<borrow|return>`; Mega→PC `READY / OPENED,<l> / SCAN,<uid> /
+DONE,<l>,<uid>,<slot> / TIMEOUT,<l> / NOWIRE,<l>`. Relay/LED pins for lockers 1–4 filled
+(relay 22-25, LED 26-28+38, buzzer D40); **lockers 5–10 relay/LED pins are `0` placeholders.**
+**Ultrasonic = PER-SLOT** (one sensor per tool position, 34 total): `slotEcho[locker][slot]` +
+one `SHARED_TRIG_PIN` (all echo pins currently `0` — awaiting the user's wiring). Pin budget:
+per-sensor trig+echo (68 pins) won't fit a Mega, so the design uses **1 shared trig + 1 echo per
+slot (~35 pins)**. If no sensors are wired for a locker, it falls back to tag-only confirm so it's
+testable now.
+
+**Physical UI**: **Raspberry Pi 7″ capacitive touchscreen (800×480)** on the mini PC runs
+`terminal.html` — keep that page touch-friendly and fitting 800×480 (T&C scrolls). Power: 650VA UPS.
+
+**Bridge**: `firmware/bridge/bridge.py` (headless) and `bridge_gui.py` (Tkinter) both poll the
+command queue and confirm results. `pip install pyserial`; config in `config.ini`.
+
+**Terminal** (`laravel/public/terminal.html` + `assets/js/terminal.js`): captures the QR
+keyboard-wedge, shows program + eligibility, does the screen-driven borrow/return, and has an
+on-screen "simulate tag scan" input so it works without hardware.
+
+**Verified session 5:** PHP8 lint clean; migrate:fresh --seed OK; QR parse + program gate
+(eligible passes, non-BIT rejected); borrow-request→commands→confirm(real tag) borrow+return;
+wrong-locker tag blocked; already-borrowed tag blocked; bridges `py_compile`; terminal.js
+`node --check`; all 8 admin pages headless-render (31 avail / 3 borrowed / 2 overdue / 1 banned).
+DB left clean, servers stopped.
+
+---
+
 
 ## What this is
 Admin website + device API for a **smart tool locker** system: students borrow/return lab tools

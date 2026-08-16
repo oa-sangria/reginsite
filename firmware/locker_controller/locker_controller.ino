@@ -1,34 +1,36 @@
 /* ============================================================================
    reginsite — Locker Controller firmware  (Arduino Mega 2560)
-   4-locker smart tool cabinet · RFID borrow/return toggle
+   Smart Tool Lending Cabinet · SCREEN-DRIVEN · PER-SLOT ultrasonic detection
    ----------------------------------------------------------------------------
-   Each tool has its own RFID tag. Scan a tag:
-       tool is IN  -> that locker UNLOCKS, logs a BORROW  (LED on)
-       tool is OUT -> that locker LOCKS,   logs a RETURN  (LED off)
+   The touchscreen (mini PC) decides everything. The Arduino obeys OPEN
+   commands, watches the PER-SLOT ultrasonic sensors to see which tool moved,
+   reads the tool's RFID tag, and reports back. It does NOT touch the database
+   — the mini-PC bridge does.
 
-   The Mega has no network/clock, so it doesn't touch the database. It talks
-   over USB serial (115200) to bridge.py on the mini PC, which calls the
-   Laravel API. See firmware/README.md.
-
-   Ultrasonic sensors are read + printed for monitoring but do NOT gate the
-   borrow/return logic yet (that's the next step).
-
-   --- Pins (your wiring) -----------------------------------------------------
-   RC522:  SS/SDA=53  SCK=52  MOSI=51  MISO=50  RST=9   VCC=3.3V  GND=GND
-                        Locker1  Locker2  Locker3  Locker4
-     Relay ............   22       23       24       25
-     LED ..............   26       27       28       38
-     Ultrasonic TRIG ..   30       32       34       36
-     Ultrasonic ECHO ..   29       33       35       37
+   FLOW (borrow):
+     PC -> OPEN,<locker>,borrow
+     Mega: unlock locker, buzzer beep, red LED
+     student removes a tool -> that SLOT's ultrasonic sees it leave
+     student scans the tool's RFID tag on the RC522
+     Mega -> DONE,<locker>,<uid>,<slot>   -> bridge records the borrow
+     (return waits for a slot to become FILLED again)
+     timeout -> TIMEOUT,<locker>, relock
 
    --- Serial protocol --------------------------------------------------------
-   Mega -> PC:  READY
-                SCAN,<uid>                    a known tag was read
-                UNKNOWN,<uid>                 tag not in the table below
-                EVENT,OPEN,<locker>,<uid>     locker opened  -> bridge BORROWs
-                EVENT,CLOSE,<locker>,<uid>    locker closed  -> bridge RETURNs
-   PC -> Mega:  ACK                           DB write ok  (LED confirm blink)
-                NAK,<msg>                      DB write failed (LED error blink)
+   PC  -> Mega : OPEN,<locker>,<borrow|return>
+   Mega-> PC   : READY
+                 OPENED,<locker>
+                 SCAN,<uid>
+                 DONE,<locker>,<uid>,<slot>   (slot = 1..N, or 0 if unknown)
+                 TIMEOUT,<locker>
+                 NOWIRE,<locker>
+
+   ----------------------------------------------------------------------------
+   >>> PIN BUDGET NOTE <<<
+   Full build = 34 ultrasonic sensors. Per-sensor trig+echo (68 pins) will NOT
+   fit a Mega alongside relays + RC522 + buzzer. Recommended wiring: ONE shared
+   TRIG line to every sensor (SHARED_TRIG_PIN) + one ECHO pin per slot (~35
+   pins). This sketch is built for that. Fill the pin tables when wired.
    ============================================================================ */
 
 #include <SPI.h>
@@ -36,74 +38,78 @@
 
 #define SS_PIN  53
 #define RST_PIN 9
+#define BUZZER_PIN 40
+// The buzzer is a TESTING aid only. Real status signaling is the LED.
+// Leave false for production; set true if you want audible feedback while testing.
+const bool BUZZER_ENABLED = false;
 MFRC522 rfid(SS_PIN, RST_PIN);
 
-/* ===========================================================================
-   >>> STEP 1: register your 4 tags here. <<<
-   Upload once with these blank, open Serial Monitor @115200, and tap each tag.
-   You'll see e.g.  UNKNOWN,DE AD BE EF   — copy that UID (uppercase, spaces ok)
-   into the slot for the locker that tag belongs to, then re-upload.
-   =========================================================================== */
-String tagUID[4] = {
-  "",   // Locker 1 tag
-  "",   // Locker 2 tag
-  "",   // Locker 3 tag
-  ""    // Locker 4 tag
+const uint8_t NUM_LOCKERS = 10;
+const uint8_t MAX_SLOTS   = 4;
+
+/* Solenoid relay + status LED, one per locker. 0 = not wired yet.
+   Lockers 1-4 use your tested wiring; fill 5-10 when built. */
+const uint8_t relayPins[NUM_LOCKERS] = { 22, 23, 24, 25, 0, 0, 0, 0, 0, 0 };
+const uint8_t ledPins  [NUM_LOCKERS] = { 26, 27, 28, 38, 0, 0, 0, 0, 0, 0 };
+
+/* How many tool slots each locker has (matches the seeded inventory). */
+const uint8_t slotCount[NUM_LOCKERS] = { 4, 4, 4, 4, 4, 4, 2, 4, 4, 0 };
+
+/* Per-slot ultrasonic ECHO pins.  slotEcho[locker][slot]. 0 = not wired.
+   >>> FILL THESE WHEN YOU WIRE THE SENSORS (one echo pin per slot). <<< */
+const uint8_t slotEcho[NUM_LOCKERS][MAX_SLOTS] = {
+  { 0, 0, 0, 0 },  // Locker 1  Soldering Iron  (4 slots)
+  { 0, 0, 0, 0 },  // Locker 2  Plier
+  { 0, 0, 0, 0 },  // Locker 3  Clamp Ammeter
+  { 0, 0, 0, 0 },  // Locker 4  Multitester
+  { 0, 0, 0, 0 },  // Locker 5  Screwdriver Set
+  { 0, 0, 0, 0 },  // Locker 6  Side Cutter
+  { 0, 0, 0, 0 },  // Locker 7  Makita Drill (2 slots)
+  { 0, 0, 0, 0 },  // Locker 8  Wire Stripper
+  { 0, 0, 0, 0 },  // Locker 9  Wire Crimper
+  { 0, 0, 0, 0 },  // Locker 10 spare
 };
 
-/* ---- Pins ---------------------------------------------------------------- */
-const byte relayPins[4] = { 22, 23, 24, 25 };
-const byte ledPins[4]   = { 26, 27, 28, 38 };
-const byte trigPins[4]  = { 30, 32, 34, 36 };
-const byte echoPins[4]  = { 29, 33, 35, 37 };
+/* One shared TRIG line to all sensors (set the pin once you wire it; 0 = none). */
+const uint8_t SHARED_TRIG_PIN = 0;
 
-/* ---- Settings ------------------------------------------------------------ */
-const bool  ACTIVE_LOW = true;              // your relay board is active-low
-const float TOOL_PRESENT_THRESHOLD = 8.0;   // cm (used by sensors, not yet in logic)
-const bool  DEBUG_DISTANCE = false;         // true = print sensor distances every 2s
-const unsigned long SCAN_COOLDOWN_MS = 2000;
+const bool  ACTIVE_LOW = true;              // relay board polarity
+const float PRESENT_CM = 8.0;               // <= this = a tool is in the slot
+const unsigned long OPEN_TIMEOUT_MS = 20000;
 
-/* ---- State --------------------------------------------------------------- */
-bool lockerState[4] = { false, false, false, false };   // false = locked
-String lastUID = "";
-unsigned long lastScanMs = 0;
-unsigned long lastDistMs = 0;
+bool wired(uint8_t i)         { return i < NUM_LOCKERS && relayPins[i] != 0; }
+bool sensorsWired(uint8_t i)  { for (uint8_t s = 0; s < slotCount[i]; s++) if (slotEcho[i][s]) return true; return false; }
 
-/* ---- Relay / LED --------------------------------------------------------- */
-void lockLocker(byte i) {
-  digitalWrite(relayPins[i], ACTIVE_LOW ? HIGH : LOW);   // de-energize = locked
-  digitalWrite(ledPins[i], LOW);
-  lockerState[i] = false;
-  Serial.print("Locker "); Serial.print(i + 1); Serial.println(" LOCKED");
+/* ---- Relay / LED / buzzer ------------------------------------------------- */
+void relay(uint8_t i, bool energized) {
+  digitalWrite(relayPins[i], (ACTIVE_LOW ? !energized : energized) ? HIGH : LOW);
 }
-void unlockLocker(byte i) {
-  digitalWrite(relayPins[i], ACTIVE_LOW ? LOW : HIGH);   // energize = unlocked
-  digitalWrite(ledPins[i], HIGH);
-  lockerState[i] = true;
-  Serial.print("Locker "); Serial.print(i + 1); Serial.println(" UNLOCKED");
-}
-
-/* ---- Ultrasonic (monitoring only for now) -------------------------------- */
-float readDistance(byte s) {
-  digitalWrite(trigPins[s], LOW);  delayMicroseconds(2);
-  digitalWrite(trigPins[s], HIGH); delayMicroseconds(10);
-  digitalWrite(trigPins[s], LOW);
-  long duration = pulseIn(echoPins[s], HIGH, 30000);
-  if (duration == 0) return -1;
-  return duration * 0.0343 / 2.0;
-}
-void printDistances() {
-  Serial.println("-------------- distances --------------");
-  for (byte i = 0; i < 4; i++) {
-    float d = readDistance(i);
-    Serial.print("Locker "); Serial.print(i + 1); Serial.print(" : ");
-    if (d < 0) Serial.println("No Echo");
-    else { Serial.print(d); Serial.println(" cm"); }
+void lockLocker(uint8_t i)   { relay(i, false); if (ledPins[i]) digitalWrite(ledPins[i], LOW); }
+void unlockLocker(uint8_t i) { relay(i, true);  if (ledPins[i]) digitalWrite(ledPins[i], HIGH); }
+void beep(int ms, int times = 1) {
+  if (!BUZZER_ENABLED) return;            // test-only; production uses the LED
+  for (int k = 0; k < times; k++) {
+    digitalWrite(BUZZER_PIN, HIGH); delay(ms);
+    digitalWrite(BUZZER_PIN, LOW);  if (k < times - 1) delay(ms);
   }
 }
 
-/* ---- UID helpers --------------------------------------------------------- */
-// Uppercase hex, space-separated, e.g. "DE AD BE EF"
+/* ---- Per-slot ultrasonic ------------------------------------------------- */
+float slotDistance(uint8_t locker, uint8_t slot) {
+  uint8_t echo = slotEcho[locker][slot];
+  if (!echo || !SHARED_TRIG_PIN) return -1;
+  digitalWrite(SHARED_TRIG_PIN, LOW);  delayMicroseconds(2);
+  digitalWrite(SHARED_TRIG_PIN, HIGH); delayMicroseconds(10);
+  digitalWrite(SHARED_TRIG_PIN, LOW);
+  long dur = pulseIn(echo, HIGH, 30000);
+  return dur == 0 ? -1 : dur * 0.0343 / 2.0;
+}
+bool slotFilled(uint8_t locker, uint8_t slot) {
+  float d = slotDistance(locker, slot);
+  return d >= 0 && d <= PRESENT_CM;
+}
+
+/* ---- RFID ---------------------------------------------------------------- */
 String uidString() {
   String s = "";
   for (byte i = 0; i < rfid.uid.size; i++) {
@@ -114,102 +120,104 @@ String uidString() {
   s.toUpperCase();
   return s;
 }
-// Which locker (0..3) owns this UID, or -1 if unknown.
-int lockerForUID(const String &uid) {
-  for (byte i = 0; i < 4; i++)
-    if (tagUID[i].length() && tagUID[i] == uid) return i;
-  return -1;
+String readTagOrEmpty() {
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return "";
+  String u = uidString();
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
+  return u;
 }
 
-/* ---- LED feedback from the bridge (ACK/NAK) ------------------------------ */
-void blink(byte pin, byte times, int ms) {
-  for (byte i = 0; i < times; i++) {
-    digitalWrite(pin, HIGH); delay(ms);
-    digitalWrite(pin, LOW);  delay(ms);
+/* ---- Handle one OPEN command -------------------------------------------- */
+void handleOpen(uint8_t locker1, const String &mode) {
+  uint8_t i = locker1 - 1;
+  if (!wired(i)) { Serial.print("NOWIRE,"); Serial.println(locker1); return; }
+
+  bool wantFill = (mode == "return");   // return = a slot becomes FILLED again
+  bool haveSensors = sensorsWired(i);
+
+  // Snapshot which slots are filled right now (baseline for change detection).
+  bool baseline[MAX_SLOTS];
+  for (uint8_t s = 0; s < slotCount[i]; s++) baseline[s] = haveSensors ? slotFilled(i, s) : false;
+
+  unlockLocker(i);
+  beep(120);
+  Serial.print("OPENED,"); Serial.println(locker1);
+
+  unsigned long start = millis();
+  String tag = "";
+  int changedSlot = -1;
+
+  while (millis() - start < OPEN_TIMEOUT_MS) {
+    // 1) capture the tool's tag when scanned
+    if (tag == "") {
+      String u = readTagOrEmpty();
+      if (u != "") { tag = u; Serial.print("SCAN,"); Serial.println(u); }
+    }
+    // 2) find a slot whose state made the expected transition
+    if (haveSensors && changedSlot < 0) {
+      for (uint8_t s = 0; s < slotCount[i]; s++) {
+        bool now = slotFilled(i, s);
+        if (wantFill ? (!baseline[s] && now) : (baseline[s] && !now)) { changedSlot = s; break; }
+      }
+    }
+    // Confirm when we have the tag AND (a sensor change, or no sensors wired yet)
+    if (tag != "" && (changedSlot >= 0 || !haveSensors)) {
+      lockLocker(i);
+      beep(80, 2);
+      Serial.print("DONE,"); Serial.print(locker1); Serial.print(",");
+      Serial.print(tag); Serial.print(","); Serial.println(changedSlot + 1); // 1-based, 0 = unknown
+      return;
+    }
+    delay(40);
   }
+
+  lockLocker(i);
+  beep(400);
+  Serial.print("TIMEOUT,"); Serial.println(locker1);
 }
+
+/* ---- Serial command parsing --------------------------------------------- */
 void handleSerial() {
+  static String buf = "";
   while (Serial.available()) {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
-    if (line.length() == 0) continue;
-    // Confirm on the most-recently-toggled locker's LED, then restore it.
-    int i = lockerForUID(lastUID);
-    byte pin = (i >= 0) ? ledPins[i] : LED_BUILTIN;
-    bool restore = (i >= 0) ? lockerState[i] : false;
-    if (line == "ACK")            blink(pin, 2, 90);
-    else if (line.startsWith("NAK")) blink(pin, 3, 200);
-    if (i >= 0) digitalWrite(pin, restore ? HIGH : LOW);
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (buf.startsWith("OPEN,")) {
+        int c1 = buf.indexOf(',');
+        int c2 = buf.indexOf(',', c1 + 1);
+        uint8_t locker = buf.substring(c1 + 1, c2 > 0 ? c2 : buf.length()).toInt();
+        String mode = c2 > 0 ? buf.substring(c2 + 1) : "borrow";
+        mode.trim();
+        handleOpen(locker, mode);
+      }
+      buf = "";
+    } else {
+      buf += c;
+    }
   }
 }
 
 /* ========================================================================== */
 void setup() {
   Serial.begin(115200);
-  Serial.println();
-  Serial.println("==========================================");
-  Serial.println(" SMART TOOL LENDING CABINET  (reginsite)");
-  Serial.println("==========================================");
-
   SPI.begin();
   rfid.PCD_Init();
-  Serial.print("RC522 Version : ");
-  rfid.PCD_DumpVersionToSerial();
 
-  for (byte i = 0; i < 4; i++) {
+  pinMode(BUZZER_PIN, OUTPUT);
+  if (SHARED_TRIG_PIN) pinMode(SHARED_TRIG_PIN, OUTPUT);
+  for (uint8_t i = 0; i < NUM_LOCKERS; i++) {
+    if (!wired(i)) continue;
     pinMode(relayPins[i], OUTPUT);
-    pinMode(ledPins[i], OUTPUT);
-    pinMode(trigPins[i], OUTPUT);
-    pinMode(echoPins[i], INPUT);
-    lockLocker(i);                 // start locked
+    if (ledPins[i]) pinMode(ledPins[i], OUTPUT);
+    for (uint8_t s = 0; s < slotCount[i]; s++)
+      if (slotEcho[i][s]) pinMode(slotEcho[i][s], INPUT);
+    lockLocker(i);
   }
-  pinMode(LED_BUILTIN, OUTPUT);
 
   Serial.println("READY");
-  Serial.println("Waiting for RFID tag...");
 }
 
 void loop() {
   handleSerial();
-
-  if (DEBUG_DISTANCE && millis() - lastDistMs > 2000) {
-    lastDistMs = millis();
-    printDistances();
-  }
-
-  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
-
-  String uid = uidString();
-  unsigned long now = millis();
-
-  // Debounce the same tag held on the reader.
-  if (uid == lastUID && (now - lastScanMs) < SCAN_COOLDOWN_MS) {
-    rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
-    return;
-  }
-  lastUID = uid;
-  lastScanMs = now;
-
-  int i = lockerForUID(uid);
-  if (i < 0) {
-    // Unknown tag: print it so you can register it in tagUID[] above.
-    Serial.print("UNKNOWN,"); Serial.println(uid);
-    rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
-    return;
-  }
-
-  Serial.print("SCAN,"); Serial.println(uid);
-
-  bool willOpen = !lockerState[i];
-  if (willOpen) unlockLocker(i); else lockLocker(i);
-
-  // Tell the bridge: OPEN -> borrow, CLOSE -> return.
-  Serial.print("EVENT,");
-  Serial.print(willOpen ? "OPEN," : "CLOSE,");
-  Serial.print(i + 1);            // 1-based locker number
-  Serial.print(",");
-  Serial.println(uid);
-
-  rfid.PICC_HaltA();
-  rfid.PCD_StopCrypto1();
 }

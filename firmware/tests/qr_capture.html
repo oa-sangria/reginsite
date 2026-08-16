@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QR Scanner Capture — reginsite</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, Arial, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+    h1 { font-size: 20px; } p { color: #555; }
+    textarea { width: 100%; height: 120px; font-family: Consolas, monospace; font-size: 14px; padding: 10px; }
+    pre { background: #14121c; color: #d8d3e8; padding: 14px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; }
+    .btn { padding: 8px 14px; border: 1px solid #ccc; border-radius: 8px; background: #f4f4f4; cursor: pointer; }
+    .lbl { font-weight: 600; margin-top: 18px; }
+  </style>
+</head>
+<body>
+  <h1>QR Scanner Capture (SM8070)</h1>
+  <p>The USB QR scanner acts like a keyboard. Click the box below, then scan a student ID.
+     This shows the <b>exact</b> text it sends (newlines/tabs made visible) so the parser can be
+     matched. Copy the "escaped" output and send it back.</p>
+
+  <textarea id="box" placeholder="Click here, then scan a QR code…" autofocus></textarea>
+  <p><button class="btn" onclick="clearAll()">Clear</button></p>
+
+  <div class="lbl">Raw (escaped — shows \n newlines, \t tabs):</div>
+  <pre id="escaped">—</pre>
+
+  <div class="lbl">As it looks:</div>
+  <pre id="plain">—</pre>
+
+  <script>
+    var box = document.getElementById("box");
+    function render() {
+      var v = box.value;
+      document.getElementById("escaped").textContent = JSON.stringify(v);
+      document.getElementById("plain").textContent = v || "—";
+    }
+    function clearAll() { box.value = ""; render(); box.focus(); }
+    box.addEventListener("input", render);
+    box.addEventListener("keydown", function (e) {
+      // let Enter/Tab register as characters instead of moving focus / submitting
+      if (e.key === "Tab") { e.preventDefault(); box.value += "\t"; render(); }
+    });
+  </script>
+</body>
+</html>

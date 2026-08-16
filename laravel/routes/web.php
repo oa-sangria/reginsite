@@ -31,10 +31,16 @@ Route::prefix('api')->group(function () {
         Route::post('terms', [InventoryController::class, 'saveTerms']);
     });
 
-    // Device API for the ESP32 terminal (X-API-Key)
+    // Device API for the locker terminal + Arduino bridge (X-API-Key)
     Route::middleware('device.key')->prefix('esp32')->group(function () {
         Route::post('verify-student', [Esp32Controller::class, 'verifyStudent']);
         Route::post('state', [Esp32Controller::class, 'state']);
+        // screen-driven flow
+        Route::post('borrow-request', [Esp32Controller::class, 'borrowRequest']);
+        Route::post('return-request', [Esp32Controller::class, 'returnRequest']);
+        Route::get('commands', [Esp32Controller::class, 'commands']);
+        Route::post('confirm', [Esp32Controller::class, 'confirm']);
+        // immediate (simulator / direct tests)
         Route::post('borrow', [Esp32Controller::class, 'borrow']);
         Route::post('return', [Esp32Controller::class, 'returnTool']);
         Route::post('locker-status', [Esp32Controller::class, 'lockerStatus']);
