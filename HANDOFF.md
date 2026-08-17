@@ -1,7 +1,80 @@
 # reginsite — Session Handoff / Project Notes
 
 > Living doc so any agent/session can pick up where we left off. **Update this when you change things.**
-> Last updated: 2026-06-16 (session 5: **screen-driven flow + real tool inventory + QR program gate**)
+> Last updated: 2026-08-17 (session 6: **kiosk UI rebuilt — "Workshop Light"**)
+
+## ⚠ Hardware facts corrected this session (earlier notes were wrong)
+- **The touchscreen is 1024×600, not 800×480.** 7″ IPS, 5-point capacitive, **HDMI + USB touch,
+  driver-free** (sold as a "Raspberry Pi 7 inch" monitor but it is just an HDMI panel; it runs off
+  the Windows mini PC). Design to 1024×600 and launch the browser **fullscreen/kiosk** — with an
+  address bar the viewport is only ~1024×540.
+- **The SM8070 is a standalone desk unit, not part of the screen.** White/blue cube, ~7 cm, **scan
+  window faces UP**, USB keyboard-wedge, DC5V/0.5A over the same USB lead. It has a **speaker
+  grille — it beeps on a successful read**, which is the student's real confirmation. Students hold
+  the ID **QR-face-down over the window**; they do not aim it at the monitor. Any terminal copy that
+  tells them to "hold your ID up to the screen" or points in a fixed direction is wrong.
+
+## Session 6 — terminal kiosk redesign (current)
+The touchscreen terminal was a dark violet gradient page sharing the admin stylesheet and was never
+laid out for the real panel. **Rebuilt from scratch as its own design system.** Flow, API calls and
+payload contract are byte-for-byte unchanged — this was presentation + kiosk behaviour.
+
+- **New file `laravel/public/assets/css/terminal.css`** — "Workshop Light": warm paper `#f2efe8`,
+  espresso ink `#1c1a24`, indigo `#5b50e6` reserved for *actions only*. Hairline warm rules, flat
+  fills, no decorative gradients. Own `--k-*` token set, all classes prefixed `k-`.
+- **Fixed panel layout, never scrolls the page.** `.k-device` is a `54px / 1fr / 30px` grid filling
+  `100vw × 100vh`. Only three regions scroll: terms, loan list, tool grid. Above 1180×700 (a dev
+  monitor) it clamps to exactly 1024×600 and picks up a bezel so it reads as an appliance instead of
+  stretching. Short lists/grids centre via `.k-listwrap`; long ones fill and scroll.
+- **The idle screen shows a drawing of the SM8070 desk unit with an ID being lowered onto it** — an
+  instruction diagram of the real motion, not a scan target on the screen. Copy is
+  "hold your ID with the QR code facing down over the scanner window; it beeps once" — no
+  directional claim, since where the unit sits on the counter is up to whoever installs it.
+- **The dead `.term-*` block was deleted from `styles.css`** (was ~77 lines, nothing else used it).
+  terminal.html no longer loads the admin stylesheet at all.
+- **Custom SVG icon sprite** inline in `terminal.html` — one coherent stroke system (1.7 / round),
+  with a glyph per real seeded tool type (soldering iron, plier, clamp ammeter, multitester,
+  screwdriver, side cutter, drill, stripper, crimper). `toolIcon()` in terminal.js maps by regex.
+  *The screwdriver is drawn upright on purpose* — diagonal it twins the soldering iron at 29px.
+- **Screens**: idle (animated QR scan target) → terms → home (identity + loans + two slab keys) →
+  picker → await (locker-door graphic + 3-step rail) → receipt (perforated ticket + drain timer).
+  Borrow picker = 5-col grid so all 10 lockers fit in two rows with no clipped row. Return picker =
+  full-width rows (short list, so it carries locker + type + out-time + due state).
+- **New kiosk behaviour** (beyond styling):
+  - **Inactivity auto-logout** — 75s, countdown shown in the status strip from 20s, urgent at 8s.
+    The await screen is exempt (a locker is physically open).
+  - **Real link indicator** — the status light goes red on any fetch failure, green on success.
+  - **`?kiosk=1`** production mode hides every bench affordance (demo IDs, simulated-tag box,
+    BENCH MODE badge, Admin link). **`?station=03`** labels the equipment bar.
+  - **Due-time chips** computed from `expectedReturn` ("DUE IN 5H 24M" / "OVERDUE 23H 0M").
+  - A rejected simulated tag now shows **inline** instead of `alert()` and keeps the poll alive.
+  - **QR wedge bug fixed**: keystrokes aimed at a focused input no longer double-feed the wedge
+    buffer (it used to fire a premature `doScan` while someone typed a student no.).
+- **Verified — layout**: `node --check` clean; all 11 screen states captured headless at 1024×600 via
+  a fetch-stubbing harness that drives the *real* JS by clicking (scratchpad `gen.js`).
+- **Verified — logic, against live Laravel + MySQL** (no stubs, same-origin driver pages temporarily
+  dropped in `public/`, since deleted):
+  - `verify-student` real payload renders correctly — real name/major, real open loan with a due
+    chip computed from `expectedReturn`, all 9 lockers with real availability counts, real terms.
+  - `Locker 1 — Soldering Iron` parses to plate `LKR 01` + type `Soldering Iron` (em-dash split).
+  - **Real borrow**: locker-1 request → command #3 queued → `confirm` with tag `E9:8C:7B:06` →
+    `Soldering Iron 2` flipped to *borrowed*, tx6 written against locker 1 with an 8-hour due time,
+    command marked *done*, receipt rendered from the real response.
+  - **Real return**: same tool → tx6 *returned* with a `return_time`, tool back to *available*,
+    locker 1 LED back to *green*, student's open borrows back to 1.
+  - **Wrong-tag rejection**: confirming a locker-4 tag against locker 1 returned the real server
+    error "Scanned tag is not a tool from this locker", shown inline with the locker still open and
+    the poll still alive — no dead end.
+  - Receipt auto-dismiss to idle after 10s confirmed (it fired during a long capture).
+  - DB reseeded clean afterwards (31 available / 3 borrowed / 0 device_commands); server stopped.
+- ⚠ **Known gap**: the "key in your student no." input has no on-screen keypad, so on the Pi it only
+  works if a virtual keyboard is installed. `inputmode="numeric"` is set. The QR scanner is the real
+  input path; add a numeric keypad overlay if manual entry needs to work unattended.
+- The **legacy root `terminal.html` + root `assets/` were deliberately left untouched** (deprecated
+  plain-PHP fallback, different API base). Only the Laravel copy was redesigned.
+
+---
+
 
 ## Session 5 — screen-driven system (current)
 Full hardware architecture locked in. Real parts: Dell mini PC (runs DB + Laravel + terminal UI +
@@ -50,8 +123,11 @@ per-sensor trig+echo (68 pins) won't fit a Mega, so the design uses **1 shared t
 slot (~35 pins)**. If no sensors are wired for a locker, it falls back to tag-only confirm so it's
 testable now.
 
-**Physical UI**: **Raspberry Pi 7″ capacitive touchscreen (800×480)** on the mini PC runs
-`terminal.html` — keep that page touch-friendly and fitting 800×480 (T&C scrolls). Power: 650VA UPS.
+**Physical UI**: **7″ IPS capacitive touchscreen, 1024×600, HDMI + USB touch** on the mini PC runs
+`terminal.html` — keep that page touch-friendly and fitting 1024×600 (T&C scrolls). Power: 650VA UPS.
+Launch fullscreen/kiosk with `?kiosk=1` in production (see session 6). Styling lives in its own
+`assets/css/terminal.css`, NOT the admin `styles.css`.
+*(Earlier sessions recorded 800×480 — that was wrong, corrected in session 6.)*
 
 **Bridge**: `firmware/bridge/bridge.py` (headless) and `bridge_gui.py` (Tkinter) both poll the
 command queue and confirm results. `pip install pyserial`; config in `config.ini`.

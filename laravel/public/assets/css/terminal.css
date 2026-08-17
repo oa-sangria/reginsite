@@ -1,0 +1,586 @@
+/* ============================================================================
+   reginsite — Locker Terminal  ·  "Workshop Light"
+   ---------------------------------------------------------------------------
+   NATIVE TARGET: the 7" 1024 x 600 IPS capacitive touchscreen (HDMI + USB
+   touch, driver-free) mounted on the mini PC. Launch the browser fullscreen /
+   kiosk — with an address bar the viewport is ~1024x540 and the layout has to
+   absorb it, which it does: everything flexes and only the designated regions
+   scroll.
+
+   Same family as the admin theme (warm paper / espresso ink / indigo) but
+   dressed as lab equipment: hairline rules, machined mono labels, slab keys
+   with real press physics, hazard striping for stop states. No gradients as
+   decoration, no glow, nothing that reads as a stock dark dashboard.
+
+   Layout contract: the whole UI is a fixed panel. NOTHING scrolls the page —
+   only the three designated regions (terms, loan list, tool grid) scroll.
+   It fills the viewport; on a big desktop monitor it clamps to 1024x600 and
+   picks up a bezel so it still reads as an appliance instead of stretching.
+   ========================================================================== */
+
+:root {
+  /* Paper stock */
+  --k-paper:    #f2efe8;
+  --k-paper-2:  #e9e4d8;
+  --k-card:     #fffefb;
+
+  /* Ink */
+  --k-ink:      #1c1a24;
+  --k-ink-2:    #4b4655;
+  --k-muted:    #7d7688;
+
+  /* Warm hairlines */
+  --k-line:     #ddd6c7;
+  --k-line-2:   #c9c0ac;
+
+  /* Signal hues — indigo is action, never decoration */
+  --k-indigo:   #5b50e6;
+  --k-indigo-d: #4034c4;
+  --k-indigo-w: #ebe9fd;
+  --k-green:    #0f9d6b;
+  --k-green-w:  #e2f4ec;
+  --k-green-d:  #0b6f4c;
+  --k-amber:    #b9790f;
+  --k-red:      #cf3b34;
+  --k-red-w:    #fbe7e5;
+  --k-red-d:    #98322c;
+
+  --k-font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --k-mono: "SF Mono", ui-monospace, "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+
+  --k-sh:    0 1px 1px rgba(28,26,36,.04), 0 2px 5px rgba(28,26,36,.05);
+  --k-sh-md: 0 10px 28px -12px rgba(28,26,36,.34);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; overflow: hidden; }
+.icon { width: 18px; height: 18px; flex: none; display: block; }
+
+.k-body {
+  background: #0e0d12;                 /* only ever seen on a larger display */
+  display: grid;
+  place-items: center;
+  font-family: var(--k-font);
+  color: var(--k-ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+.k-body ::selection { background: rgba(91,80,230,.2); }
+
+/* ---- The panel ----------------------------------------------------------- */
+.k-device {
+  position: relative;
+  width: 100vw; height: 100vh;
+  display: grid;
+  grid-template-rows: 54px 1fr 30px;
+  background: var(--k-paper);
+  overflow: hidden;
+}
+/* Paper stock: a barely-there engineering grid. Texture, not pattern. */
+.k-device::before {
+  content: "";
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(28,26,36,.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(28,26,36,.028) 1px, transparent 1px);
+  background-size: 26px 26px;
+  pointer-events: none;
+  z-index: 1;
+}
+/* Bigger than the panel = a dev monitor. Clamp to the real 1024x600 and bezel
+   it, rather than stretching a fixed design across 1920px. */
+@media (min-width: 1180px) and (min-height: 700px) {
+  .k-device {
+    width: 1024px; height: 600px;
+    border-radius: 20px;
+    box-shadow: 0 0 0 10px #16151b, 0 0 0 11px #34313f,
+                0 56px 110px -24px rgba(0,0,0,.72);
+  }
+}
+
+/* ---- Equipment bar ------------------------------------------------------- */
+.k-top {
+  position: relative; z-index: 3;
+  background: var(--k-ink);
+  color: #f4f1ea;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 15px;
+}
+.k-top::after {                         /* machined accent tick */
+  content: ""; position: absolute; left: 0; bottom: 0;
+  width: 92px; height: 3px; background: var(--k-indigo);
+}
+.k-topl, .k-topr { display: flex; align-items: center; gap: 11px; }
+.k-mark {
+  width: 26px; height: 26px; border-radius: 8px; flex: none;
+  background: var(--k-indigo); color: #fff;
+  display: grid; place-items: center;
+  box-shadow: inset 0 -2px 0 rgba(0,0,0,.24);
+}
+.k-mark .icon { width: 15px; height: 15px; }
+.k-brand { display: flex; flex-direction: column; line-height: 1.12; }
+.k-brand b { font-size: 12px; font-weight: 700; letter-spacing: .17em; text-transform: uppercase; }
+.k-brand i {
+  font-style: normal; font-family: var(--k-mono);
+  font-size: 9.5px; letter-spacing: .12em; color: #8d8698;
+}
+.k-vr { width: 1px; height: 20px; background: rgba(255,255,255,.13); }
+.k-station {
+  font: 600 10.5px/1 var(--k-mono); letter-spacing: .11em;
+  color: #a19aad; padding: 4px 7px; border-radius: 5px;
+  border: 1px solid rgba(255,255,255,.13);
+}
+.k-sim {
+  font: 700 9.5px/1 var(--k-mono); letter-spacing: .13em;
+  color: #e0ab53; border: 1px solid rgba(224,171,83,.42);
+  padding: 4px 8px; border-radius: 20px;
+}
+.k-clock {
+  font: 600 13px/1 var(--k-mono); letter-spacing: .04em;
+  font-variant-numeric: tabular-nums; color: #f4f1ea;
+}
+.k-live { display: flex; align-items: center; gap: 6px; }
+.k-live b { font: 700 9.5px/1 var(--k-mono); letter-spacing: .13em; color: #8d8698; }
+.k-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: #21c275; flex: none;
+  animation: kpulse 2.4s ease-in-out infinite;
+}
+@keyframes kpulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(33,194,117,.5); }
+  55%      { box-shadow: 0 0 0 5px rgba(33,194,117,0); }
+}
+.k-dot.is-down { background: var(--k-red); animation: none; }
+
+/* ---- Stage + screens ---------------------------------------------------- */
+.k-stage { position: relative; z-index: 2; overflow: hidden; }
+.k-screen {
+  position: absolute; inset: 0;
+  padding: 24px 32px;
+  display: flex; flex-direction: column;
+  animation: kenter .26s cubic-bezier(.2,.72,.2,1) both;
+}
+@keyframes kenter { from { opacity: 0; transform: translateY(9px); } }
+
+/* ---- Status strip ------------------------------------------------------- */
+.k-foot {
+  position: relative; z-index: 3;
+  background: var(--k-paper-2); border-top: 1px solid var(--k-line);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 15px;
+  font: 650 10px/1 var(--k-font); letter-spacing: .07em; text-transform: uppercase;
+  color: var(--k-muted);
+}
+.k-foot a { color: var(--k-ink-2); text-decoration: none; }
+.k-foot-r { display: flex; align-items: center; gap: 10px; }
+.k-timeout { font-family: var(--k-mono); letter-spacing: .08em; color: var(--k-amber); }
+.k-timeout.is-urgent { color: var(--k-red); }
+
+/* ---- Type scale -------------------------------------------------------- */
+.k-eyebrow {
+  display: flex; align-items: center; gap: 9px;
+  font: 700 10.5px/1 var(--k-mono); letter-spacing: .19em; text-transform: uppercase;
+  color: var(--k-indigo); flex: none;
+}
+.k-eyebrow::after { content: ""; width: 30px; height: 1px; background: currentColor; opacity: .38; }
+.k-h1 { font-size: 40px; font-weight: 730; letter-spacing: -.026em; line-height: 1.05; margin: 10px 0 0; }
+.k-h2 { font-size: 24px; font-weight: 730; letter-spacing: -.02em; line-height: 1.12; margin: 7px 0 0; }
+.k-lead { font-size: 14.6px; line-height: 1.52; color: var(--k-ink-2); margin: 9px 0 0; max-width: 40ch; }
+.k-note { font-size: 11.5px; color: var(--k-muted); margin: 0; }
+.k-sect {
+  display: flex; align-items: center; gap: 9px; flex: none;
+  font: 700 10px/1 var(--k-mono); letter-spacing: .16em; text-transform: uppercase;
+  color: var(--k-muted); margin: 0 0 7px;
+}
+.k-sect::after { content: ""; flex: 1; height: 1px; background: var(--k-line); }
+.k-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex: none; }
+
+/* Machined identifier plate — used for locker + tag numbers */
+.k-plate {
+  display: inline-flex; align-items: center; gap: 5px;
+  font: 700 10px/1 var(--k-mono); letter-spacing: .09em;
+  padding: 4px 7px; border-radius: 5px;
+  border: 1px solid var(--k-line-2); background: var(--k-paper-2); color: var(--k-ink-2);
+  white-space: nowrap;
+}
+
+/* ---- Slab keys (buttons) ----------------------------------------------- */
+.k-btn {
+  font-family: inherit; font-size: 15px; font-weight: 700;
+  height: 54px; padding: 0 22px; border-radius: 11px; border: 1px solid transparent;
+  display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+  cursor: pointer; flex: none;
+  transition: transform .07s ease, box-shadow .12s ease, background .14s ease;
+}
+.k-btn .icon { width: 17px; height: 17px; }
+.k-btn--primary {
+  background: var(--k-indigo); border-color: var(--k-indigo-d); color: #fff;
+  box-shadow: inset 0 -3px 0 rgba(0,0,0,.2), 0 3px 8px -3px rgba(64,52,196,.5);
+}
+.k-btn--ok {
+  background: var(--k-green); border-color: var(--k-green-d); color: #fff;
+  box-shadow: inset 0 -3px 0 rgba(0,0,0,.2), 0 3px 8px -3px rgba(15,157,107,.5);
+}
+.k-btn--ghost {
+  background: var(--k-card); border-color: var(--k-line-2); color: var(--k-ink-2);
+  box-shadow: inset 0 -3px 0 rgba(28,26,36,.07);
+}
+.k-btn--quiet {
+  background: transparent; border-color: transparent; color: var(--k-muted);
+  font-size: 12.5px; height: 40px; padding: 0 10px; box-shadow: none;
+}
+.k-btn:active { transform: translateY(2px); box-shadow: inset 0 -1px 0 rgba(0,0,0,.18); }
+.k-btn--quiet:active { transform: translateY(1px); box-shadow: none; }
+.k-btn[disabled] { opacity: .42; pointer-events: none; }
+.k-btn--sm { height: 44px; font-size: 13.5px; padding: 0 16px; }
+
+/* The two big home actions — the whole point of the machine */
+.k-slab {
+  position: relative; flex: 1; min-height: 0;
+  border-radius: 14px; border: 1px solid; cursor: pointer;
+  font-family: inherit; text-align: left;
+  padding: 14px 17px;
+  display: flex; flex-direction: column; justify-content: center; gap: 2px;
+  transition: transform .07s ease, box-shadow .12s ease;
+}
+.k-slab .icon { width: 28px; height: 28px; margin-bottom: 5px; }
+.k-slab b { font-size: 23px; font-weight: 750; letter-spacing: -.02em; display: block; }
+.k-slab span {
+  font: 650 10.5px/1.3 var(--k-font); letter-spacing: .06em; text-transform: uppercase;
+  opacity: .74;
+}
+.k-slab:active { transform: translateY(2px); }
+.k-slab--borrow {
+  background: var(--k-indigo); border-color: var(--k-indigo-d); color: #fff;
+  box-shadow: inset 0 -4px 0 rgba(0,0,0,.2), 0 8px 20px -8px rgba(64,52,196,.6);
+}
+.k-slab--return {
+  background: var(--k-card); border-color: var(--k-line-2); color: var(--k-ink);
+  box-shadow: inset 0 -4px 0 var(--k-green), 0 2px 6px -2px rgba(28,26,36,.18);
+}
+.k-slab--return .icon { color: var(--k-green); }
+.k-slab[disabled] {
+  background: var(--k-paper-2); border-color: var(--k-line); color: var(--k-muted);
+  box-shadow: none; cursor: not-allowed; pointer-events: none;
+}
+.k-slab[disabled] .icon { color: var(--k-line-2); }
+
+/* ---- Hazard band — lab safety language for stop states ----------------- */
+.k-hazard {
+  display: flex; align-items: flex-start; gap: 10px; flex: none;
+  border-radius: 10px; padding: 11px 14px;
+  font-size: 13.2px; font-weight: 640; line-height: 1.4;
+  background: repeating-linear-gradient(135deg, #fbf1da 0 9px, #f6e5c1 9px 18px);
+  border: 1px solid #e6cd98; color: #7a5205;
+}
+.k-hazard--stop {
+  background: repeating-linear-gradient(135deg, #fce9e7 0 9px, #f8dbd8 9px 18px);
+  border-color: #eec2bc; color: var(--k-red-d);
+}
+.k-hazard .icon { width: 17px; height: 17px; flex: none; margin-top: 1px; }
+
+/* ---- Identity ---------------------------------------------------------- */
+.k-who { display: flex; align-items: center; gap: 12px; flex: none; }
+.k-face {
+  width: 56px; height: 56px; border-radius: 13px; flex: none;
+  background: var(--k-ink); color: #f4f1ea;
+  display: grid; place-items: center;
+  font: 700 22px/1 var(--k-mono); letter-spacing: -.02em;
+  box-shadow: inset 0 -3px 0 rgba(0,0,0,.3);
+}
+.k-who h2 { font-size: 22px; font-weight: 730; letter-spacing: -.022em; margin: 0; line-height: 1.15; }
+.k-who p {
+  margin: 3px 0 0; font: 600 10.5px/1 var(--k-mono); letter-spacing: .07em;
+  color: var(--k-muted); display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+}
+.k-who p span { color: var(--k-line-2); }
+
+/* ---- Lists ------------------------------------------------------------- */
+.k-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; min-height: 0; }
+/* A short list centres in the space it is given; a long one fills and scrolls. */
+.k-listwrap { flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: center; }
+.k-listwrap > .k-list { max-height: 100%; gap: 9px; }
+.k-listwrap > .k-grid { max-height: 100%; }
+.k-row {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  background: var(--k-card); border: 1px solid var(--k-line);
+  border-radius: 10px; padding: 8px 11px;
+}
+.k-row .icon { width: 21px; height: 21px; color: var(--k-ink-2); flex: none; }
+.k-row div { min-width: 0; }
+.k-row b { font-size: 14.2px; font-weight: 700; letter-spacing: -.01em; display: block;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.k-row small { font: 600 10px/1.3 var(--k-mono); letter-spacing: .07em; color: var(--k-muted); }
+.k-due {
+  margin-left: auto; flex: none; white-space: nowrap;
+  font: 700 9.5px/1 var(--k-mono); letter-spacing: .07em;
+  padding: 5px 7px; border-radius: 5px;
+  background: var(--k-green-w); color: var(--k-green-d);
+}
+.k-due--late { background: var(--k-red-w); color: var(--k-red-d); }
+.k-empty {
+  border: 1px dashed var(--k-line-2); border-radius: 10px; padding: 15px 12px;
+  text-align: center; font-size: 12.4px; color: var(--k-muted);
+  background: rgba(255,255,255,.42); flex: none;
+}
+
+/* ---- Tool grid (borrow: browse the whole wall) ------------------------- */
+/* 5 across fits all 10 lockers in two rows on 800x480 — no clipped row, so
+   the grid never *looks* scrollable when there is nothing more to see. */
+.k-grid {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 9px;
+  overflow-y: auto; min-height: 0; align-content: start; padding: 1px 1px 3px;
+}
+.k-tool {
+  background: var(--k-card); border: 1px solid var(--k-line); border-radius: 12px;
+  padding: 11px 10px 9px; text-align: left; cursor: pointer; font-family: inherit;
+  display: flex; flex-direction: column; gap: 7px; min-height: 142px;
+  box-shadow: inset 0 -3px 0 rgba(28,26,36,.055);
+  transition: transform .07s ease, border-color .14s ease;
+}
+.k-tool:active { transform: translateY(2px); border-color: var(--k-indigo); }
+.k-tool .icon { width: 32px; height: 32px; color: var(--k-indigo); flex: none; }
+.k-tool b { font-size: 13.6px; font-weight: 720; letter-spacing: -.012em; line-height: 1.2; }
+.k-tool .k-plate { align-self: flex-start; }
+.k-pips { display: flex; align-items: center; gap: 3px; margin-top: auto; }
+.k-pips i { width: 6px; height: 6px; border-radius: 2px; background: var(--k-green); flex: none; }
+.k-pips i.off { background: var(--k-line-2); }
+.k-pips u {
+  text-decoration: none; margin-left: 4px;
+  font: 700 9px/1 var(--k-mono); letter-spacing: .08em; color: var(--k-muted);
+}
+
+/* ---- Pick rows (return: choose from the few things that are yours) ------ */
+/* Deliberately not the borrow grid — returning is picking off a short list,
+   so it gets full-width rows that carry the locker and the due state. */
+.k-pick {
+  display: flex; align-items: center; gap: 13px; flex: none; width: 100%;
+  background: var(--k-card); border: 1px solid var(--k-line-2); border-radius: 12px;
+  padding: 14px 17px; cursor: pointer; font-family: inherit; text-align: left;
+  box-shadow: inset 0 -3px 0 rgba(28,26,36,.055);
+  transition: transform .07s ease, border-color .14s ease;
+}
+.k-pick:active { transform: translateY(2px); border-color: var(--k-indigo); }
+.k-pick .k-tool-ic { width: 27px; height: 27px; color: var(--k-indigo); }
+.k-pick div { min-width: 0; }
+.k-pick b { display: block; font-size: 16.5px; font-weight: 730; letter-spacing: -.015em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.k-pick small { font: 600 10px/1.5 var(--k-mono); letter-spacing: .07em; color: var(--k-muted); }
+.k-pick .k-due { margin-left: auto; }
+.k-pick .k-chev { width: 17px; height: 17px; color: var(--k-line-2); }
+
+/* ---- Idle: how to use the reader --------------------------------------- */
+/* NOT a scan target — the screen is not the reader. This is an instruction
+   diagram of the actual SM8070 desk unit (window facing up) with an ID being
+   lowered onto it, which is the motion students have to perform. */
+.k-reader { position: relative; width: 300px; flex: none; }
+.k-reader svg { width: 100%; height: auto; display: block; }
+.k-cardfloat { animation: kbob 3.4s ease-in-out infinite; }
+@keyframes kbob { 50% { transform: translateY(-6px); } }
+.k-ping {
+  transform-box: fill-box; transform-origin: center;
+  animation: kping 2.6s cubic-bezier(.2,.6,.3,1) infinite;
+}
+@keyframes kping {
+  0%   { opacity: .7;  transform: scale(.42); }
+  70%  { opacity: 0;   transform: scale(1.25); }
+  100% { opacity: 0;   transform: scale(1.25); }
+}
+.k-readercap {
+  display: block; text-align: center; margin-top: 8px;
+  font: 650 9.5px/1.5 var(--k-mono); letter-spacing: .13em; color: var(--k-muted);
+  text-transform: uppercase;
+}
+
+/* ---- Locker door (open/await) ----------------------------------------- */
+.k-door {
+  position: relative; width: 200px; height: 226px; flex: none;
+  border: 2px solid var(--k-ink); border-radius: 12px; background: var(--k-card);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  box-shadow: 0 0 0 4px rgba(91,80,230,.14), inset 0 -5px 0 rgba(28,26,36,.07);
+  animation: kdoor 1.9s ease-in-out infinite;
+}
+@keyframes kdoor {
+  50% { box-shadow: 0 0 0 10px rgba(91,80,230,.15), inset 0 -5px 0 rgba(28,26,36,.07); }
+}
+.k-door::before {                               /* hinges */
+  content: ""; position: absolute; left: 8px; top: 24px; bottom: 24px; width: 3px;
+  border-radius: 2px;
+  background: repeating-linear-gradient(var(--k-line-2) 0 11px, transparent 11px 26px);
+}
+.k-door::after {                                /* handle */
+  content: ""; position: absolute; right: 11px; top: 50%; margin-top: -17px;
+  width: 6px; height: 34px; border-radius: 3px; background: var(--k-ink-2);
+}
+.k-door u {
+  text-decoration: none;
+  font: 650 9.5px/1 var(--k-mono); letter-spacing: .15em; text-transform: uppercase;
+  color: var(--k-muted);
+}
+.k-door b {
+  font: 700 58px/1 var(--k-mono); letter-spacing: -.04em;
+  font-variant-numeric: tabular-nums;
+}
+.k-door em {
+  font-style: normal; margin-top: 5px;
+  font: 700 9.5px/1 var(--k-mono); letter-spacing: .13em; text-transform: uppercase;
+  color: #fff; background: var(--k-indigo); border-radius: 20px; padding: 5px 10px;
+}
+.k-door-type {
+  font-size: 11.5px; font-weight: 650; color: var(--k-ink-2);
+  max-width: 140px; text-align: center; line-height: 1.25;
+}
+
+/* ---- Step rail --------------------------------------------------------- */
+.k-rail { list-style: none; margin: 0; padding: 0; }
+.k-rail li { position: relative; padding: 0 0 18px 40px; }
+.k-rail li:last-child { padding-bottom: 0; }
+.k-rail li::before {
+  content: attr(data-n); position: absolute; left: 0; top: 0;
+  width: 26px; height: 26px; border-radius: 8px;
+  display: grid; place-items: center;
+  font: 700 10px/1 var(--k-mono); letter-spacing: .03em;
+  background: var(--k-paper-2); border: 1px solid var(--k-line-2); color: var(--k-muted);
+}
+.k-rail li::after {
+  content: ""; position: absolute; left: 13px; top: 30px; bottom: 3px;
+  width: 1px; background: var(--k-line-2);
+}
+.k-rail li:last-child::after { display: none; }
+.k-rail li b { display: block; font-size: 15px; font-weight: 700; color: var(--k-muted); letter-spacing: -.01em; }
+.k-rail li small { font-size: 12.2px; color: var(--k-muted); }
+.k-rail li.is-active::before {
+  background: var(--k-indigo); border-color: var(--k-indigo-d); color: #fff;
+  box-shadow: 0 0 0 4px rgba(91,80,230,.16);
+}
+.k-rail li.is-active b { color: var(--k-ink); }
+.k-rail li.is-done::before { content: "✓"; background: var(--k-green); border-color: var(--k-green-d); color: #fff; }
+.k-rail li.is-done b { color: var(--k-ink-2); }
+
+/* ---- Receipt ----------------------------------------------------------- */
+.k-ticket {
+  position: relative; width: 372px;
+  background: var(--k-card); border: 1px solid var(--k-line-2); border-radius: 12px;
+  padding: 16px 19px 15px; box-shadow: var(--k-sh-md); text-align: left;
+}
+.k-ticket-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.k-ticket-top u {
+  text-decoration: none;
+  font: 700 9.5px/1 var(--k-mono); letter-spacing: .15em; text-transform: uppercase;
+  color: var(--k-muted);
+}
+.k-seal {
+  width: 34px; height: 34px; border-radius: 50%; flex: none;
+  background: var(--k-green-w); color: var(--k-green-d);
+  display: grid; place-items: center; border: 1.5px solid rgba(15,157,107,.35);
+}
+.k-seal .icon { width: 19px; height: 19px; }
+.k-ticket h2 { font-size: 23px; font-weight: 740; letter-spacing: -.024em; margin: 9px 0 0; line-height: 1.15; }
+.k-perf {
+  position: relative; height: 1px; margin: 13px -19px;
+  background: repeating-linear-gradient(90deg, var(--k-line-2) 0 5px, transparent 5px 11px);
+}
+.k-perf::before, .k-perf::after {
+  content: ""; position: absolute; top: -7px; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--k-paper);
+}
+.k-perf::before { left: -7px; }
+.k-perf::after  { right: -7px; }
+.k-kv { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
+.k-kv dt { font: 650 10px/1.5 var(--k-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--k-muted); }
+.k-kv dd { margin: 0; font: 700 11.5px/1.5 var(--k-mono); letter-spacing: .03em; color: var(--k-ink); text-align: right; }
+.k-timer { height: 3px; border-radius: 2px; background: var(--k-line); overflow: hidden; margin-top: 13px; }
+.k-timer i { display: block; height: 100%; background: var(--k-indigo); animation: kdrain linear forwards; }
+@keyframes kdrain { from { width: 100%; } to { width: 0; } }
+
+/* ---- Terms ------------------------------------------------------------- */
+.k-terms {
+  flex: 1; min-height: 0; overflow-y: auto; margin: 11px 0 0;
+  background: var(--k-card); border: 1px solid var(--k-line); border-radius: 12px;
+  padding: 13px 16px;
+  font-family: inherit; font-size: 13.3px; line-height: 1.74; color: var(--k-ink-2);
+  white-space: pre-wrap;
+  box-shadow: inset 0 -8px 10px -8px rgba(28,26,36,.09);   /* "there is more" cue */
+  -webkit-user-select: text; user-select: text;
+}
+
+/* ---- Verdict plates (reading / error) --------------------------------- */
+.k-plate-lg {
+  width: 74px; height: 74px; border-radius: 20px; flex: none;
+  display: grid; place-items: center; margin-bottom: 4px;
+  background: var(--k-indigo-w); color: var(--k-indigo);
+  box-shadow: inset 0 0 0 1px rgba(91,80,230,.2);
+}
+.k-plate-lg .icon { width: 34px; height: 34px; }
+.k-plate-lg--stop { background: var(--k-red-w); color: var(--k-red); box-shadow: inset 0 0 0 1px rgba(207,59,52,.22); }
+.k-plate-lg--ok   { background: var(--k-green-w); color: var(--k-green-d); box-shadow: inset 0 0 0 1px rgba(15,157,107,.24); }
+
+.k-spin {
+  width: 46px; height: 46px; border-radius: 50%; flex: none;
+  border: 3px solid var(--k-line); border-top-color: var(--k-indigo);
+  animation: kspin .78s linear infinite; margin-bottom: 6px;
+}
+@keyframes kspin { to { transform: rotate(360deg); } }
+
+/* ---- Inputs ------------------------------------------------------------ */
+.k-input {
+  height: 54px; min-width: 0; flex: 1;
+  border-radius: 11px; border: 1px solid var(--k-line-2); background: var(--k-card);
+  padding: 0 14px; color: var(--k-ink);
+  font: 600 15px/1 var(--k-mono); letter-spacing: .05em;
+  box-shadow: inset 0 2px 3px rgba(28,26,36,.05);
+  -webkit-user-select: text; user-select: text;
+}
+.k-input::placeholder { color: #a79fb0; font-weight: 500; letter-spacing: .02em; }
+.k-input:focus { outline: none; border-color: var(--k-indigo); box-shadow: 0 0 0 3px rgba(91,80,230,.16); }
+.k-input--sm { height: 44px; font-size: 13px; }
+.k-inputrow { display: flex; gap: 9px; align-items: center; }
+
+.k-chips { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.k-chip {
+  font: 700 11.5px/1 var(--k-mono); letter-spacing: .06em;
+  background: transparent; border: 1px dashed var(--k-line-2); color: var(--k-ink-2);
+  border-radius: 20px; padding: 8px 12px; cursor: pointer;
+}
+.k-chip:active { transform: translateY(1px); border-style: solid; border-color: var(--k-indigo); }
+
+/* Bench-test affordance — deliberately marked as not part of the real UI */
+.k-dev {
+  display: flex; align-items: center; gap: 9px; flex: none;
+  border: 1px dashed var(--k-line-2); border-radius: 10px; padding: 8px 10px;
+  background: rgba(255,255,255,.44);
+}
+.k-dev-tag {
+  font: 700 9px/1.35 var(--k-mono); letter-spacing: .13em; text-transform: uppercase;
+  color: var(--k-muted); flex: none; max-width: 62px;
+}
+.k-err {
+  margin: 6px 0 0; font: 650 11.5px/1.4 var(--k-font);
+  color: var(--k-red-d); display: flex; align-items: center; gap: 6px;
+}
+.k-err .icon { width: 14px; height: 14px; }
+
+/* A due chip inside a tool card sits inline, not pushed to the right */
+.k-tool .k-due { margin-left: 0; align-self: flex-start; margin-top: auto; }
+
+/* ---- Layout helpers --------------------------------------------------- */
+.k-fill   { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.k-center { flex: 1; min-height: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; text-align: center; }
+.k-split  { flex: 1; min-height: 0; display: grid; gap: 20px; align-items: center; }
+.k-split--scan { grid-template-columns: 300px 1fr; gap: 38px; }
+.k-split--home { grid-template-columns: 1fr 280px; align-items: stretch; }
+.k-split--door { grid-template-columns: 200px 1fr; }
+.k-col   { display: flex; flex-direction: column; min-height: 0; gap: 9px; }
+.k-col--pad { justify-content: center; }
+.k-spacer { flex: 1; min-height: 0; }
+.k-actions { display: flex; gap: 9px; align-items: center; flex: none; }
+.k-actions--end { justify-content: flex-end; }
+
+@media (prefers-reduced-motion: reduce) {
+  .k-screen, .k-cardfloat, .k-ping, .k-door, .k-dot, .k-spin, .k-timer i { animation: none; }
+  .k-ping { opacity: .35; }
+}

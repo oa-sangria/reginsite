@@ -2,33 +2,160 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Locker Terminal — Reginsite</title>
-  <link rel="stylesheet" href="assets/css/styles.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#1c1a24" />
+  <title>Tool Locker Terminal — Reginsite</title>
+  <link rel="stylesheet" href="assets/css/terminal.css" />
 </head>
-<body class="term-body">
-  <div class="term-shell">
-    <header class="term-top">
-      <div class="term-brand">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M18 8h-1V6A5 5 0 0 0 7 6v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zM9 6a3 3 0 0 1 6 0v2H9V6zm3 11a2 2 0 1 1 0-4 2 2 0 0 1 0 4z"/>
-        </svg>
-        <span>Smart Tool Locker — Terminal</span>
-      </div>
-      <div class="term-meta">
-        <span class="badge badge-warn">SIMULATOR</span>
-        <span id="termClock"></span>
-      </div>
-    </header>
+<body class="k-body">
 
-    <main class="term-stage" id="stage"><!-- screens rendered by terminal.js --></main>
+<!-- ==========================================================================
+     Icon set — drawn for this machine. One coherent stroke system (1.7 / round)
+     so the tool glyphs read as a family, not as clip art. Referenced by <use>.
+     ======================================================================== -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <!-- interface -->
+  <symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="4.6" y="10.4" width="14.8" height="9.9" rx="2.2"/>
+    <path d="M8.1 10.4V7.6a3.9 3.9 0 0 1 7.8 0v2.8"/>
+    <path d="M12 14.6v1.8"/>
+  </symbol>
+  <symbol id="i-qr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 9.2V5.6A1.6 1.6 0 0 1 5.6 4h3.6"/>
+    <path d="M14.8 4h3.6A1.6 1.6 0 0 1 20 5.6v3.6"/>
+    <path d="M20 14.8v3.6a1.6 1.6 0 0 1-1.6 1.6h-3.6"/>
+    <path d="M9.2 20H5.6A1.6 1.6 0 0 1 4 18.4v-3.6"/>
+    <path d="M4.4 12h15.2"/>
+  </symbol>
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4.8 12.6l4.7 4.7L19.4 7.2"/>
+  </symbol>
+  <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6.4 6.4l11.2 11.2M17.6 6.4L6.4 17.6"/>
+  </symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 4.4l8.3 14.4H3.7L12 4.4z"/>
+    <path d="M12 9.6v3.9"/><path d="M12 16.3v.5"/>
+  </symbol>
+  <symbol id="i-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14.6 5.4L8 12l6.6 6.6"/>
+  </symbol>
+  <symbol id="i-next" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9.4 5.4L16 12l-6.6 6.6"/>
+  </symbol>
+  <symbol id="i-out" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M11.4 5.4H5.6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h5.8"/>
+    <path d="M9 12h11.4"/><path d="M16.9 8.5L20.4 12l-3.5 3.5"/>
+  </symbol>
+  <symbol id="i-in" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12.6 5.4h5.8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-5.8"/>
+    <path d="M3.6 12H15"/><path d="M11.5 8.5L15 12l-3.5 3.5"/>
+  </symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4.6 11.1V5.6a1 1 0 0 1 1-1h5.5l8.3 8.3-6.5 6.5-8.3-8.3z"/>
+    <path d="M8.2 8.1v.4"/>
+  </symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="7.9"/><path d="M12 7.4V12l3.4 2.1"/>
+  </symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14.4 8V6.6a2 2 0 0 0-2-2H6.6a2 2 0 0 0-2 2v10.8a2 2 0 0 0 2 2h5.8a2 2 0 0 0 2-2V16"/>
+    <path d="M9.8 12h10.4"/><path d="M17.1 8.7l3.3 3.3-3.3 3.3"/>
+  </symbol>
 
-    <footer class="term-foot">
-      Simulates the ESP32 locker terminal using the same API the hardware will use ·
-      <a href="index.html">Admin site</a>
-    </footer>
-  </div>
+  <!-- the actual inventory: 9 tool types -->
+  <symbol id="t-soldering" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M19.7 4.3l-5.5 5.5" stroke-width="3.6"/>
+    <path d="M14.2 9.8l-3.3 3.3" stroke-width="1.7"/>
+    <path d="M10.9 13.1l-2.4 2.4" stroke-width="2.6"/>
+    <path d="M8.5 15.5l-3.6 3.6" stroke-width="1.7"/>
+    <circle cx="4" cy="20" r="1.2" stroke-width="1.5"/>
+  </symbol>
+  <symbol id="t-plier" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10.3 3.4l1.1 7.2"/><path d="M13.7 3.4l-1.1 7.2"/>
+    <circle cx="12" cy="12.2" r="1.5"/>
+    <path d="M11 13.5L8.3 20.7"/><path d="M13 13.5l2.7 7.2"/>
+  </symbol>
+  <symbol id="t-cutter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8.2 3.8l3.5 6.6"/><path d="M15.8 3.8l-3.5 6.6"/>
+    <circle cx="12" cy="12" r="1.5"/>
+    <path d="M11 13.4L8.3 20.6"/><path d="M13 13.4l2.7 7.2"/>
+  </symbol>
+  <symbol id="t-stripper" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10.2 3.5l1.2 6.9"/><path d="M13.8 3.5l-1.2 6.9"/>
+    <path d="M10.6 6.4h2.8"/>
+    <circle cx="12" cy="12" r="1.5"/>
+    <path d="M11 13.4L8.3 20.6"/><path d="M13 13.4l2.7 7.2"/>
+  </symbol>
+  <symbol id="t-crimper" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 2.8l2.7 1.6v3.1L12 9.1 9.3 7.5V4.4z"/>
+    <path d="M10.7 9.7l.6 1"/><path d="M13.3 9.7l-.6 1"/>
+    <circle cx="12" cy="12.2" r="1.5"/>
+    <path d="M11 13.5L8.3 20.7"/><path d="M13 13.5l2.7 7.2"/>
+  </symbol>
+  <symbol id="t-clamp" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12.6 3.3a4.3 4.3 0 0 1 3.7 4.25V9.6"/>
+    <path d="M11.4 3.3a4.3 4.3 0 0 0-3.7 4.25V9.6"/>
+    <rect x="6.6" y="9.6" width="10.8" height="10.8" rx="2.2"/>
+    <path d="M9.2 12.6h5.6"/><path d="M9.2 15.1h3.6"/>
+    <circle cx="12" cy="18" r="1.4"/>
+  </symbol>
+  <symbol id="t-multitester" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="5.1" y="3.5" width="13.8" height="17" rx="2.4"/>
+    <rect x="7.7" y="5.9" width="8.6" height="4" rx="1"/>
+    <circle cx="12" cy="14.6" r="2.5"/><path d="M12 14.6v-1.5"/>
+    <circle cx="8.6" cy="18.5" r=".85"/><circle cx="15.4" cy="18.5" r=".85"/>
+  </symbol>
+  <!-- Kept upright on purpose: a diagonal driver reads as a twin of the
+       soldering iron at 29px, and the two sit side by side in the grid. -->
+  <symbol id="t-screwdriver" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3.6v5.2" stroke-width="4.2"/>
+    <path d="M12 9.4v1" stroke-width="2.4"/>
+    <path d="M12 10.6v6.2" stroke-width="1.7"/>
+    <path d="M12 17.2v3.2" stroke-width="3.2"/>
+  </symbol>
+  <symbol id="t-drill" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3.6 7.4h9a1.8 1.8 0 0 1 1.8 1.8v2.4a1.8 1.8 0 0 1-1.8 1.8h-9z"/>
+    <path d="M14.4 9.4h2.5v3h-2.5z"/><path d="M16.9 10.9h3.5"/>
+    <path d="M6.6 13.4l-1.1 4.3a1.3 1.3 0 0 0 1.26 1.62h2.4a1.3 1.3 0 0 0 1.27-1l.25-1"/>
+    <path d="M5.6 19.6h5"/>
+  </symbol>
+  <symbol id="t-generic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14.6 3.6a4.4 4.4 0 0 0-1.2 7.4l-8.3 8.3 1.6 1.6 8.3-8.3a4.4 4.4 0 0 0 5.3-6.6l-2.7 2.7-2.6-2.6z"/>
+  </symbol>
+</svg>
 
-  <script src="assets/js/terminal.js"></script>
+<div class="k-device" id="device">
+
+  <header class="k-top">
+    <div class="k-topl">
+      <span class="k-mark"><svg class="icon"><use href="#i-lock"/></svg></span>
+      <span class="k-brand">
+        <b>Tool Locker</b>
+        <i>Electrical · Mechatronics · HVAC&amp;R</i>
+      </span>
+      <span class="k-vr"></span>
+      <span class="k-station" id="station">STATION 01</span>
+    </div>
+    <div class="k-topr">
+      <span class="k-sim" id="simBadge">BENCH MODE</span>
+      <span class="k-clock" id="clock">--:--</span>
+      <span class="k-live"><span class="k-dot"></span><b id="liveLabel">LINK</b></span>
+    </div>
+  </header>
+
+  <main class="k-stage" id="stage"><!-- screens are rendered by terminal.js --></main>
+
+  <footer class="k-foot">
+    <span id="hint">Scanner ready</span>
+    <span class="k-foot-r">
+      <span class="k-timeout" id="timeout"></span>
+      <a href="index.html" id="adminLink">Admin</a>
+    </span>
+  </footer>
+
+</div>
+
+<script src="assets/js/terminal.js"></script>
 </body>
 </html>
