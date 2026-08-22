@@ -2,12 +2,14 @@
    reginsite — RFID Read Test  (Arduino Mega 2560)
    ----------------------------------------------------------------------------
    Minimal sketch: just prints the UID of any RFID card/tag you scan.
-   Use it to read your 4 tag UIDs, then paste them into the tagUID[] table
-   in locker_controller.ino.
+   Use it to re-read a tag whose UID has stopped matching, then correct it on
+   the Inventory page (tools.rfid_tag). All 34 tags are already seeded.
 
-   Wiring (RC522 -> Mega):
-     SS/SDA = 53   SCK = 52   MOSI = 51   MISO = 50   RST = 9
+   Wiring (RC522 -> Mega 1):
+     SS/SDA = 53   SCK = 52   MOSI = 51   MISO = 50   RST = 5
      VCC = 3.3V (NOT 5V)      GND = GND
+   NOTE: RST moved 9 -> 5 in the two-controller rewire; D9 is now free and the
+   buzzer lives on D16. The RC522 is on Mega 1 only.
 
    Library: MFRC522 (Arduino IDE > Library Manager > "MFRC522")
    Serial Monitor: 115200 baud
@@ -17,11 +19,30 @@
 #include <MFRC522.h>
 
 #define SS_PIN  53
-#define RST_PIN 9
+#define RST_PIN 5
 
 MFRC522 rfid(SS_PIN, RST_PIN);
 
+/* Relay pins are held OFF while this sketch runs.
+   This test has nothing to do with the solenoids, but a pin it never configures
+   stays high-impedance, and a floating input on an ACTIVE-LOW relay board can
+   drift low and energize the solenoid for as long as the sketch is loaded.
+   Both pin sets are listed so this is safe whether the rig is still on the old
+   bench wiring (IN1=D22, IN2=D23) or already moved to the production pins. */
+const uint8_t RELAY_PINS[] = { 22, 23, A12, A13 };
+const bool    ACTIVE_LOW   = true;
+
+void holdRelaysOff() {
+  for (uint8_t i = 0; i < sizeof(RELAY_PINS) / sizeof(RELAY_PINS[0]); i++) {
+    uint8_t p = RELAY_PINS[i];
+    digitalWrite(p, ACTIVE_LOW ? HIGH : LOW);   // still INPUT -> enables the pull-up
+    pinMode(p, OUTPUT);                         // latches that level, no LOW glitch
+    digitalWrite(p, ACTIVE_LOW ? HIGH : LOW);
+  }
+}
+
 void setup() {
+  holdRelaysOff();                              // FIRST, before anything slow
   Serial.begin(115200);
   SPI.begin();
   rfid.PCD_Init();

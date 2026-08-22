@@ -69,49 +69,66 @@ class DatabaseSeeder extends Seeder
             ]);
         }
 
-        // --- Lockers (one tool TYPE each; #10 spare) --------------------------
-        $lockerNames = [
-            1 => 'Soldering Iron', 2 => 'Plier', 3 => 'Clamp Ammeter', 4 => 'Multitester (Metro)',
-            5 => 'Screwdriver Set', 6 => 'Side Cutter', 7 => 'Makita Drill', 8 => 'Wire Stripper',
-            9 => 'Wire Crimper', 10 => 'Spare',
+        /* --- Cabinets + tools -------------------------------------------------
+         * Matches the two-Mega production pin map: cabinets 1-8 have 4 ultrasonic
+         * slots, cabinets 9 and 10 have 1 each (34 sensors, 34 tools). The two
+         * Makita Drills get a cabinet each, which is why 9 and 10 are single-slot.
+         * Cabinets 1-5 live on Mega 1, cabinets 6-10 on Mega 2.
+         *
+         * INVARIANT: lockers.id (auto-increment) == the physical cabinet number the
+         * bridge sends in "OPEN,<locker>,<mode>". Seeding order is therefore load
+         * bearing — if a locker is ever deleted and re-created the ids shift and
+         * OPEN will unlock the wrong door.
+         *
+         * Each entry: cabinet label => [tool-name prefix, first tool number, UIDs].
+         * The name prefix and start index are separate from the label so cabinets 9
+         * and 10 can be "Makita Drill A"/"B" while holding "Makita Drill 1"/"2".
+         */
+        $inventory = [
+            1  => ['Pliers',          'Pliers',         1, ['E5:77:7B:06', 'CD:5B:7B:06', '93:0E:79:06', '25:F8:7A:06']],
+            2  => ['Side Cutter',     'Side Cutter',    1, ['1A:D9:78:06', '5C:D8:7A:06', 'BA:F0:7B:06', '63:75:7B:06']],
+            3  => ['Wire Crimper',    'Wire Crimper',   1, ['CB:56:CF:83', '63:98:66:06', 'E1:C9:66:06', '87:3A:7C:06']],
+            4  => ['Clamp Meter',     'Clamp Meter',    1, ['CE:B8:7C:06', '4E:B0:78:06', 'D6:42:7B:06', '72:8B:79:06']],
+            5  => ['Multimeter',      'Multimeter',     1, ['C5:CB:7A:06', '0D:6B:7A:06', 'F4:38:7C:06', 'DE:73:7B:06']],
+            6  => ['Screwdriver Set', 'Screwdriver Set',1, ['F2:01:7A:06', '0C:D7:7B:06', '81:1C:7B:06', '8C:B3:7C:06']],
+            7  => ['Wire Stripper',   'Wire Stripper',  1, ['1E:3C:78:06', '74:D6:7B:06', '56:CD:7C:06', '3B:86:7C:06']],
+            8  => ['Soldering Iron',  'Soldering Iron', 1, ['A7:45:64:06', 'E9:8C:7B:06', 'B7:5D:7A:06', 'DB:F0:7B:06']],
+            9  => ['Makita Drill A',  'Makita Drill',   1, ['92:E0:7C:06']],
+            10 => ['Makita Drill B',  'Makita Drill',   2, ['41:3A:78:06']],
         ];
-        foreach ($lockerNames as $n => $label) {
+
+        foreach ($inventory as $n => [$label, , , ]) {
             Locker::create([
                 'name' => "Locker {$n} — {$label}",
-                'sensor' => $n === 10 ? 'offline' : 'online',
-                'occupancy' => 'present', 'led' => $n === 10 ? 'off' : 'green',
+                'sensor' => 'online', 'occupancy' => 'present', 'led' => 'green',
                 'last_seen' => Carbon::now(),
             ]);
         }
 
-        // --- Tools: real RFID tags, grouped into lockers ----------------------
-        $inventory = [
-            1 => ['Soldering Iron', ['A7:45:64:06', 'E9:8C:7B:06', 'B7:5D:7A:06', 'DB:F0:7B:06']],
-            2 => ['Plier',          ['E5:77:7B:06', 'CD:5B:7B:06', '93:0E:79:06', '25:F8:7A:06']],
-            3 => ['Clamp Ammeter',  ['CE:B8:7C:06', '4E:B0:78:06', 'D6:42:7B:06', '72:8B:79:06']],
-            4 => ['Multitester',    ['C5:CB:7A:06', '0D:6B:7A:06', 'F4:38:7C:06', 'DE:73:7B:06']],
-            5 => ['Screwdriver Set',['F2:01:7A:06', '0C:D7:7B:06', '81:1C:7B:06', '8C:B3:7C:06']],
-            6 => ['Side Cutter',    ['1A:D9:78:06', '5C:D8:7A:06', 'BA:F0:7B:06', '63:75:7B:06']],
-            7 => ['Makita Drill',   ['92:E0:7C:06', '41:3A:78:06']],
-            8 => ['Wire Stripper',  ['1E:3C:78:06', '74:D6:7B:06', '56:CD:7C:06', '3B:86:7C:06']],
-            9 => ['Wire Crimper',   ['CB:56:CF:83', '63:98:66:06', 'E1:C9:66:06', '87:3A:7C:06']],
-        ];
-        $byTag = [];
-        foreach ($inventory as $lockerId => [$type, $uids]) {
+        $byTag = [];        // normalized tag => tool id
+        $lockerOf = [];     // normalized tag => cabinet number
+        foreach ($inventory as $lockerId => [, $prefix, $firstNo, $uids]) {
             foreach ($uids as $i => $uid) {
                 $tag = $this->norm($uid);
                 $t = Tool::create([
-                    'name' => $type . ' ' . ($i + 1),
+                    'name' => $prefix . ' ' . ($firstNo + $i),
                     'rfid_tag' => $tag,
                     'locker_id' => $lockerId,
                     'status' => 'available',
                 ]);
                 $byTag[$tag] = $t->id;
+                $lockerOf[$tag] = $lockerId;
             }
         }
 
         // --- A little demo history so the dashboard isn't empty ---------------
-        $mk = function (int $studentId, int $toolId, int $lockerId, int $borrowAgoH, ?int $returnAgoH) {
+        // Takes a UID, not a tool id + locker id: the cabinet is derived from the
+        // inventory above so the two can never disagree when tools are re-homed.
+        $mk = function (int $studentId, string $uid, int $borrowAgoH, ?int $returnAgoH)
+                use ($byTag, $lockerOf) {
+            $tag = $this->norm($uid);
+            $toolId = $byTag[$tag];
+            $lockerId = $lockerOf[$tag];
             $borrow = Carbon::now()->subHours($borrowAgoH);
             $expected = $borrow->copy()->addHours(8);
             $return = $returnAgoH === null ? null : Carbon::now()->subHours($returnAgoH);
@@ -126,15 +143,12 @@ class DatabaseSeeder extends Seeder
             }
         };
         // Active (tx #1 = the overdue one that drives the ban)
-        $solder1 = $byTag[$this->norm('A7:45:64:06')];   // Soldering Iron 1, locker 1
-        $multi1  = $byTag[$this->norm('C5:CB:7A:06')];   // Multitester 1, locker 4
-        $side1   = $byTag[$this->norm('1A:D9:78:06')];   // Side Cutter 1, locker 6
-        $mk(1, $solder1, 1, 72, null);   // Kurt — overdue 3 days -> banned
-        $mk(2, $multi1, 4, 2, null);     // Nhoel — on time
-        $mk(6, $side1, 6, 9, null);      // Carlo — overdue (>8h)
+        $mk(1, 'A7:45:64:06', 72, null);   // Kurt  — Soldering Iron 1 (cab 8), overdue 3 days -> banned
+        $mk(2, 'C5:CB:7A:06', 2,  null);   // Nhoel — Multimeter 1 (cab 5), on time
+        $mk(6, '1A:D9:78:06', 9,  null);   // Carlo — Side Cutter 1 (cab 2), overdue (>8h)
         // Returned today
-        $mk(3, $byTag[$this->norm('E5:77:7B:06')], 2, 28, 5);   // Plier 1
-        $mk(5, $byTag[$this->norm('F2:01:7A:06')], 5, 30, 4);   // Screwdriver Set 1
+        $mk(3, 'E5:77:7B:06', 28, 5);      // Bene  — Pliers 1 (cab 1)
+        $mk(5, 'F2:01:7A:06', 30, 4);      // Bea   — Screwdriver Set 1 (cab 6)
 
         Ban::create([
             'student_id' => 1, 'transaction_id' => 1,

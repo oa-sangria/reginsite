@@ -193,12 +193,23 @@ class BridgeApp:
             if line:
                 self.ui_q.put(("log", (f"[mega] {line}", "muted")))
                 if line.startswith("DONE,"):
-                    parts = (line.split(",", 2) + ["", ""])[:3]
-                    locker, uid = parts[1], parts[2]
-                    cid = self.outstanding.pop(int(locker), None) if locker.isdigit() else None
+                    # DONE,<locker>,<uid>,<slot>  — the Mega always sends 4 fields.
+                    # Splitting with maxsplit=2 would glue ",<slot>" onto the uid, and
+                    # Tool::normTag keeps digits, so the tag would never match.
+                    parts  = line.split(",", 3)
+                    locker = parts[1] if len(parts) > 1 else ""
+                    uid    = parts[2] if len(parts) > 2 else ""
+                    slot   = parts[3] if len(parts) > 3 else "0"
+                    cid = self.outstanding.get(int(locker)) if locker.isdigit() else None
                     if cid:
-                        ok, data = api(self.cfg, "POST", "confirm", {"command_id": cid, "uid": uid})
+                        payload = {"command_id": cid, "uid": uid}
+                        if slot.isdigit() and int(slot) > 0:
+                            payload["slot"] = int(slot)
+                        ok, data = api(self.cfg, "POST", "confirm", payload)
                         if ok:
+                            # Pop only once the server has it; a failed confirm otherwise
+                            # loses the command id and the transaction is never recorded.
+                            self.outstanding.pop(int(locker), None)
                             r = data.get("result", {})
                             self.ui_q.put(("log", (f"{data.get('action','?').upper()} saved: "
                                                    f"{data.get('tool')} (tx #{r.get('txId')})", "ok")))
@@ -210,6 +221,15 @@ class BridgeApp:
                     if cid:
                         api(self.cfg, "POST", "confirm", {"command_id": cid, "timeout": True})
                         self.ui_q.put(("log", (f"Locker {locker} timed out; cancelled.", "bad")))
+                elif line.startswith("NOWIRE,"):
+                    # That cabinet lives on the other controller (or isn't built yet).
+                    # Cancel it, or the command stays 'sent' forever and the kiosk
+                    # waits on a door that is never going to open.
+                    locker = line.split(",", 1)[1]
+                    cid = self.outstanding.pop(int(locker), None) if locker.isdigit() else None
+                    if cid:
+                        api(self.cfg, "POST", "confirm", {"command_id": cid, "timeout": True})
+                    self.ui_q.put(("log", (f"Locker {locker} is NOT on this controller; cancelled.", "bad")))
 
             if time.time() - last_poll >= POLL_EVERY:
                 last_poll = time.time()

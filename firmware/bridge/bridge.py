@@ -32,6 +32,9 @@ except ImportError:
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.ini")
 POLL_EVERY = 1.0        # seconds between command polls
+STALE_AFTER = 30.0      # give up on a command the Mega never answers
+                        # (its own OPEN window is 20s, so this only fires when the
+                        #  board is unplugged, wedged, or answering a different port)
 
 
 def load_config():
@@ -73,7 +76,22 @@ def main():
     print(f"  serial : {cfg['port']} @ {cfg['baud']}")
     print(f"  server : {cfg['base_url']}")
 
-    outstanding = {}   # locker_number -> command_id awaiting DONE/TIMEOUT
+    # locker_number -> [command_id, deadline]. The deadline exists so a board that
+    # is unplugged mid-transaction (its DONE never arrives) cannot leave the
+    # command 'sent' forever with the kiosk waiting on it.
+    outstanding = {}
+
+    def pending(locker):
+        """command_id awaiting DONE/TIMEOUT for this locker, or None."""
+        if not str(locker).isdigit():
+            return None
+        e = outstanding.get(int(locker))
+        return e[0] if e else None
+
+    def resolve(locker):
+        """Forget this locker's command once the server has accepted the outcome."""
+        if str(locker).isdigit():
+            outstanding.pop(int(locker), None)
 
     while True:
         try:
@@ -94,21 +112,54 @@ def main():
                 if line:
                     print(f"[mega] {line}")
                     if line.startswith("DONE,"):
-                        _, locker, uid = (line.split(",", 2) + ["", ""])[:3]
-                        cid = outstanding.pop(int(locker), None) if locker.isdigit() else None
+                        # DONE,<locker>,<uid>,<slot>  — the Mega always sends 4 fields.
+                        # Splitting with maxsplit=2 would glue ",<slot>" onto the uid, and
+                        # Tool::normTag keeps digits, so the tag would never match.
+                        parts  = line.split(",", 3)
+                        locker = parts[1] if len(parts) > 1 else ""
+                        uid    = parts[2] if len(parts) > 2 else ""
+                        slot   = parts[3] if len(parts) > 3 else "0"
+                        cid = pending(locker)
                         if cid:
-                            ok, data = api(cfg, "POST", "confirm", {"command_id": cid, "uid": uid})
+                            payload = {"command_id": cid, "uid": uid}
+                            if slot.isdigit() and int(slot) > 0:
+                                payload["slot"] = int(slot)
+                            ok, data = api(cfg, "POST", "confirm", payload)
                             if ok:
+                                # Resolve only once the server has it; dropping it before
+                                # a failed confirm would lose the command id for good and
+                                # the transaction would never be recorded.
+                                resolve(locker)
                                 r = data.get("result", {})
                                 print(f"  -> {data.get('action','?').upper()} saved: {data.get('tool')} (tx #{r.get('txId')})")
                             else:
                                 print(f"  -> confirm failed: {data}")
                     elif line.startswith("TIMEOUT,"):
                         locker = line.split(",", 1)[1]
-                        cid = outstanding.pop(int(locker), None) if locker.isdigit() else None
+                        cid = pending(locker)
                         if cid:
                             api(cfg, "POST", "confirm", {"command_id": cid, "timeout": True})
+                            resolve(locker)
                             print(f"  -> locker {locker} timed out; cancelled.")
+                    elif line.startswith("NOWIRE,"):
+                        # That cabinet lives on the other controller (or isn't built yet).
+                        # Cancel it: otherwise the command stays 'sent' forever and the
+                        # kiosk waits on a door that is never going to open.
+                        locker = line.split(",", 1)[1]
+                        cid = pending(locker)
+                        if cid:
+                            api(cfg, "POST", "confirm", {"command_id": cid, "timeout": True})
+                            resolve(locker)
+                        print(f"  -> locker {locker} is NOT on this controller; cancelled.")
+
+                # --- give up on commands the Mega never answered -------------
+                now = time.time()
+                for lk in [k for k, (_, due) in list(outstanding.items()) if now > due]:
+                    cid = pending(lk)
+                    if cid:
+                        api(cfg, "POST", "confirm", {"command_id": cid, "timeout": True})
+                        print(f"  -> locker {lk} never answered ({STALE_AFTER}s); cancelled.")
+                    resolve(lk)
 
                 # --- poll the server for new OPEN commands -------------------
                 if time.time() - last_poll >= POLL_EVERY:
@@ -119,7 +170,7 @@ def main():
                             locker = c.get("lockerId")
                             mode = c.get("mode", "borrow")
                             ser.write(f"OPEN,{locker},{mode}\n".encode("utf-8"))
-                            outstanding[int(locker)] = c["id"]
+                            outstanding[int(locker)] = [c["id"], time.time() + STALE_AFTER]
                             print(f"  <- OPEN locker {locker} ({mode}) [cmd {c['id']}]")
         except serial.SerialException:
             print("  serial disconnected — reopening...")
