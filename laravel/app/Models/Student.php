@@ -24,7 +24,9 @@ class Student extends Model
         return $this->transactions()->whereNull('return_time');
     }
 
-    /* Eligibility: allowed program/major, not banned, no overdue item. */
+    /* Eligibility: allowed program/major, not banned, holding nothing.
+       Term 2 of the posted T&C is "OVERDUE **or unreturned**" — one tool at a
+       time — so any open borrow blocks, not just an overdue one. */
     public function eligibility(): array
     {
         // Program gate only applies once a program is on file (scanned IDs);
@@ -37,9 +39,20 @@ class Student extends Model
             $until = $this->banned_until ? $this->banned_until->format('Y-m-d H:i:s') : '—';
             return ['can_borrow' => false, 'reason' => 'Student is banned until ' . $until];
         }
-        $overdue = $this->openBorrows()->where('status', 'overdue')->count();
-        if ($overdue > 0) {
-            return ['can_borrow' => false, 'reason' => "Has {$overdue} overdue item(s) — must return first"];
+
+        // One query for both checks; overdue is reported first because it is the
+        // more serious state and it is what drives the ban.
+        $open = $this->openBorrows()->with('tool')->get();
+        $overdue = $open->where('status', 'overdue');
+        if ($overdue->count() > 0) {
+            return ['can_borrow' => false,
+                'reason' => 'Has ' . $overdue->count() . ' overdue item(s) — must return first'];
+        }
+        if ($open->count() > 0) {
+            $names = $open->map(fn ($t) => optional($t->tool)->name)->filter()->implode(', ');
+            return ['can_borrow' => false,
+                'reason' => 'Already holding ' . ($names !== '' ? $names : $open->count() . ' tool(s)')
+                    . ' — return it before borrowing again'];
         }
         return ['can_borrow' => true, 'reason' => 'Clear'];
     }

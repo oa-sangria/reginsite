@@ -23,6 +23,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 
 try:
     import serial
@@ -80,6 +81,10 @@ def main():
     # is unplugged mid-transaction (its DONE never arrives) cannot leave the
     # command 'sent' forever with the kiosk waiting on it.
     outstanding = {}
+    # Commands fetched from the server but not yet written to the Mega. Needed
+    # because the server marks them 'sent' the moment we poll, so a command we
+    # decline to write now would otherwise be lost.
+    queue = deque()
 
     def pending(locker):
         """command_id awaiting DONE/TIMEOUT for this locker, or None."""
@@ -107,6 +112,25 @@ def main():
 
         try:
             while True:
+                # --- TEMPORARY BRING-UP TEST HOOK ----------------------------
+                # Drop a line of text into inject.txt and the bridge forwards it
+                # to the Mega. Lets the full chain be exercised without a tag in
+                # hand. REMOVE once hardware testing is finished.
+                _inj = os.path.join(HERE, "inject.txt")
+                if os.path.exists(_inj):
+                    try:
+                        # utf-8-sig strips a BOM if an editor (or PowerShell's
+                        # -Encoding utf8) wrote one; the Mega parses bytes, so a
+                        # stray BOM would silently break the command match.
+                        with open(_inj, "r", encoding="utf-8-sig") as fh:
+                            _payload = fh.read().strip()
+                        os.remove(_inj)
+                        if _payload:
+                            ser.write((_payload + "\n").encode("utf-8"))
+                            print(f"  <- INJECT {_payload}")
+                    except OSError as e:
+                        print(f"  inject failed: {e}")
+
                 # --- read anything the Mega said -----------------------------
                 line = ser.readline().decode("utf-8", errors="replace").strip()
                 if line:
@@ -162,16 +186,33 @@ def main():
                     resolve(lk)
 
                 # --- poll the server for new OPEN commands -------------------
+                # GET /commands flips pending -> sent, so anything fetched is ours
+                # and will never be handed out again. Queue it locally rather than
+                # writing it straight to the Mega.
                 if time.time() - last_poll >= POLL_EVERY:
                     last_poll = time.time()
                     ok, data = api(cfg, "GET", "commands")
                     if ok:
                         for c in data.get("commands", []):
-                            locker = c.get("lockerId")
-                            mode = c.get("mode", "borrow")
-                            ser.write(f"OPEN,{locker},{mode}\n".encode("utf-8"))
-                            outstanding[int(locker)] = [c["id"], time.time() + STALE_AFTER]
-                            print(f"  <- OPEN locker {locker} ({mode}) [cmd {c['id']}]")
+                            queue.append(c)
+                            print(f"  queued cmd {c['id']} (locker {c.get('lockerId')}, {c.get('mode','borrow')})")
+
+                # --- dispatch one at a time ----------------------------------
+                # SINGLE-FLIGHT, globally. handleOpen() blocks the Mega for up to
+                # 20s, so writing a second OPEN just buries it in the 64-byte
+                # serial buffer: the student gets a door opening they did not ask
+                # for, and because `outstanding` is keyed by locker the second
+                # command silently overwrites the first, so the wrong one gets
+                # cancelled. There is also only ONE RC522 in the whole system, so
+                # two cabinets open at once makes a scan unattributable.
+                if queue and not outstanding:
+                    c = queue.popleft()
+                    locker = c.get("lockerId")
+                    mode = c.get("mode", "borrow")
+                    ser.write(f"OPEN,{locker},{mode}\n".encode("utf-8"))
+                    outstanding[int(locker)] = [c["id"], time.time() + STALE_AFTER]
+                    print(f"  <- OPEN locker {locker} ({mode}) [cmd {c['id']}]"
+                          + (f"  ({len(queue)} waiting)" if queue else ""))
         except serial.SerialException:
             print("  serial disconnected — reopening...")
             try:

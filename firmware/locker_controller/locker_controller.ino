@@ -71,6 +71,20 @@
    safe bring-up path before the ultrasonics go in. */
 const bool SENSORS_ENABLED = false;
 
+/* BRING-UP DIAGNOSTIC — set false for production.
+   Allows "SIMTAG,<uid>" over serial to stand in for a physical tag scan, so the
+   whole chain (bridge -> OPEN -> DONE -> Laravel) can be exercised without a
+   tool in hand. It bypasses the reader, so anyone with serial access could
+   trigger a borrow — which is why it must be off in the field. */
+const bool ALLOW_SIMTAG = true;
+
+/* Idle tag reporting, toggleable at runtime with "IDLESCAN,0|1".
+   It MUST be off while running RF diagnostics: the idle poll and a diagnostic
+   REQA are two independent anticollision sequences aimed at the same tag, and
+   they collide into a malformed ATQA that looks exactly like a hardware fault.
+   Any measurement taken with this on is measuring the firmware, not the reader. */
+bool idleScanEnabled = true;
+
 const uint8_t MAX_SLOTS = 4;
 
 struct Slot    { uint8_t trig, echo; };
@@ -150,6 +164,22 @@ void relaysSafeInit() {
     pinMode(p, OUTPUT);
     digitalWrite(p, relayIdle());
   }
+
+  /* BRING-UP ONLY. The old bench harness had relays on D22/D23, which this
+     firmware does not drive — and an un-driven pin on an ACTIVE-LOW relay board
+     can float low and hold the solenoid on. While SENSORS_ENABLED is false those
+     pins cannot be ultrasonics yet, so parking them at the de-energized level is
+     safe and stops a half-rewired rig from energizing a solenoid.
+     This block disappears automatically once SENSORS_ENABLED is turned on, at
+     which point D22/D23 become cabinet 1's first TRIG/ECHO pair. */
+  if (!SENSORS_ENABLED) {
+    const uint8_t legacyRelayPins[] = { 22, 23 };
+    for (uint8_t i = 0; i < sizeof(legacyRelayPins) / sizeof(legacyRelayPins[0]); i++) {
+      digitalWrite(legacyRelayPins[i], relayIdle());
+      pinMode(legacyRelayPins[i], OUTPUT);
+      digitalWrite(legacyRelayPins[i], relayIdle());
+    }
+  }
 }
 
 /* ---- Buzzer (blocking; never call from inside the sensing loop) ----------- */
@@ -213,9 +243,25 @@ inline char hexDigit(uint8_t v) { return v < 10 ? ('0' + v) : ('A' + v - 10); }
 /* No String anywhere: at a ~5ms poll cadence a String-based reader would churn
    thousands of heap allocations per open window on an 8KB heap. Returns false
    without allocating in the overwhelmingly common no-card case. */
+/* PICC_IsNewCardPresent() sends REQA, which only answers cards in IDLE state.
+   Every successful read ends with PICC_HaltA(), so a tag left sitting on the
+   reader is HALTed and REQA can no longer see it — it would have to be lifted
+   and re-tapped. WUPA wakes halted cards too, so try REQA first and fall back
+   to WUPA. Without this, a tag already read while idle is invisible for the
+   whole OPEN window. */
+bool cardPresent() {
+  byte atqa[2];
+  byte size = sizeof(atqa);
+  MFRC522::StatusCode s = rfid.PICC_RequestA(atqa, &size);
+  if (s == MFRC522::STATUS_OK || s == MFRC522::STATUS_COLLISION) return true;
+  size = sizeof(atqa);
+  s = rfid.PICC_WakeupA(atqa, &size);
+  return (s == MFRC522::STATUS_OK || s == MFRC522::STATUS_COLLISION);
+}
+
 bool readTagInto(char *out, uint8_t cap) {
-  if (!rfid.PICC_IsNewCardPresent()) return false;
-  if (!rfid.PICC_ReadCardSerial())   return false;
+  if (!cardPresent())              return false;
+  if (!rfid.PICC_ReadCardSerial()) return false;
   uint8_t n = 0;
   for (uint8_t i = 0; i < rfid.uid.size; i++) {
     if (n + 3 >= cap) break;
@@ -260,6 +306,63 @@ void announce() {
   Serial.print(F("READY,")); Serial.println(CONTROLLER_ID);
 }
 
+/* ---- SELFTEST: is the reader actually talking? ---------------------------- */
+void selfTest() {
+#if HAS_RFID
+  /* The RC522 version register is the one honest answer about SPI wiring.
+     0x91/0x92 = a real chip responding. 0x00 or 0xFF means the bus is dead:
+     wrong SS/RST pin, MISO not connected, or VCC on 5V instead of 3.3V. */
+  uint8_t v = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  Serial.print(F("#rc522 version=0x"));
+  if (v < 0x10) Serial.print('0');
+  Serial.print(v, HEX);
+  if (v == 0x91 || v == 0x92) Serial.println(F(" OK"));
+  else if (v == 0x00 || v == 0xFF) Serial.println(F(" BAD - check SS=53 RST=5 MISO=50 and VCC=3.3V"));
+  else Serial.println(F(" unexpected (clone?) - may still work"));
+
+  /* A healthy chip that still reads nothing usually means the ANTENNA is off or
+     the gain is low. TxControlReg bits 0-1 drive the two antenna pins; both must
+     be set or there is no RF field and no tag can ever answer. */
+  uint8_t tx = rfid.PCD_ReadRegister(MFRC522::TxControlReg);
+  Serial.print(F("#rc522 TxControlReg=0x"));
+  if (tx < 0x10) Serial.print('0');
+  Serial.print(tx, HEX);
+  Serial.println((tx & 0x03) == 0x03 ? F(" antenna ON") : F(" ANTENNA OFF"));
+
+  uint8_t gain = (rfid.PCD_ReadRegister(MFRC522::RFCfgReg) >> 4) & 0x07;
+  Serial.print(F("#rc522 rx gain=")); Serial.print(gain);
+  Serial.println(gain >= 7 ? F(" (max)") : F(" (not max - raise for range)"));
+
+  /* Probe with the SAME path the real read uses. A REQA-only probe is useless
+     here: every successful read ends in PICC_HaltA(), and a HALTed card ignores
+     REQA forever — the probe would report "Timeout" against a perfectly good tag
+     sitting on the coil. cardPresent() falls back to WUPA, which wakes it. */
+  byte atqa[2]; byte n = sizeof(atqa);
+  MFRC522::StatusCode st = rfid.PICC_RequestA(atqa, &n);
+  Serial.print(F("#rc522 REQA -> "));
+  Serial.print(rfid.GetStatusCodeName(st));
+  n = sizeof(atqa);
+  MFRC522::StatusCode stw = rfid.PICC_WakeupA(atqa, &n);
+  Serial.print(F("  WUPA -> "));
+  Serial.println(rfid.GetStatusCodeName(stw));
+
+  /* The measurement that actually matters: can we complete a full read? */
+  char probe[32];
+  Serial.print(F("#rc522 full read -> "));
+  if (readTagInto(probe, sizeof(probe))) Serial.println(probe);
+  else                                   Serial.println(F("FAILED"));
+#else
+  Serial.println(F("#no rfid on this controller"));
+#endif
+  Serial.print(F("#relay pins:"));
+  for (uint8_t i = 0; i < NUM_CABS; i++) {
+    Serial.print(' '); Serial.print(CABS[i].number);
+    Serial.print('='); Serial.print(CABS[i].relayPin);
+  }
+  Serial.println();
+  Serial.println(F("SELFTEST,done"));
+}
+
 /* ---- Handle one OPEN command --------------------------------------------- */
 void handleOpen(uint8_t cabNum, const char *mode) {
   int8_t ci = cabIndex(cabNum);
@@ -280,8 +383,8 @@ void handleOpen(uint8_t cabNum, const char *mode) {
   }
 
   unlockCabinet(ci);
+  Serial.print(F("OPENED,")); Serial.println(cabNum);   // report first, beep after
   beep(120);
-  Serial.print(F("OPENED,")); Serial.println(cabNum);
 
   unsigned long start = millis(), lastPing = 0;
   char tag[32]; tag[0] = '\0';
@@ -319,11 +422,15 @@ void handleOpen(uint8_t cabNum, const char *mode) {
 
     /* 3) Confirm once we have the tag AND a sensor change (or no sensors yet). */
     if (haveTag && (changedSlot >= 0 || !haveSensors)) {
+      /* Report BEFORE beeping. beep() blocks (~240ms here), and every one of
+         those milliseconds is dead time before the server can record the
+         transaction and the kiosk can move on. Locking is a single digitalWrite,
+         so it still happens first. */
       lockCabinet(ci);
-      beep(80, 2);
       Serial.print(F("DONE,"));  Serial.print(cabNum);
       Serial.print(',');         Serial.print(tag);
       Serial.print(',');         Serial.println(changedSlot + 1);   // 1-based, 0 = unknown
+      beep(80, 2);
       return;
     }
 
@@ -332,19 +439,26 @@ void handleOpen(uint8_t cabNum, const char *mode) {
     if (readLine(cmd, sizeof(cmd))) {
       if (strcmp(cmd, "ABORT") == 0) {
         lockCabinet(ci);
+        Serial.print(F("TIMEOUT,")); Serial.println(cabNum);   // report first
         beep(400);
-        Serial.print(F("TIMEOUT,")); Serial.println(cabNum);
         return;
       }
       if (strcmp(cmd, "WHO") == 0) announce();
+      /* Stand in for a physical scan so the rest of the chain can be tested. */
+      if (ALLOW_SIMTAG && !haveTag && strncmp(cmd, "SIMTAG,", 7) == 0) {
+        strncpy(tag, cmd + 7, sizeof(tag) - 1);
+        tag[sizeof(tag) - 1] = '\0';
+        haveTag = true;
+        Serial.print(F("SCAN,")); Serial.println(tag);
+      }
     }
 
     delay(3);
   }
 
   lockCabinet(ci);
+  Serial.print(F("TIMEOUT,")); Serial.println(cabNum);   // report first
   beep(400);
-  Serial.print(F("TIMEOUT,")); Serial.println(cabNum);
 }
 
 /* ---- Serial command parsing ---------------------------------------------- */
@@ -362,6 +476,26 @@ void handleSerial() {
   }
   if (strcmp(line, "WHO") == 0)   { announce(); return; }
   if (strcmp(line, "ABORT") == 0) { return; }        // nothing is open
+  if (strcmp(line, "SELFTEST") == 0) { selfTest(); return; }
+#if HAS_RFID
+  /* GAIN,<0-7> — tune receiver gain live. Too LOW and a tag out of range never
+     answers (REQA Timeout); too HIGH and a tag pressed against the coil can
+     overload the receiver, so the ATQA comes back malformed (REQA Error).
+     The right value is hardware- and mounting-specific, so sweep it in place. */
+  if (strncmp(line, "IDLESCAN,", 9) == 0) {
+    idleScanEnabled = (atoi(line + 9) != 0);
+    Serial.print(F("#idlescan=")); Serial.println(idleScanEnabled ? 1 : 0);
+    return;
+  }
+  if (strncmp(line, "GAIN,", 5) == 0) {
+    uint8_t g = (uint8_t) atoi(line + 5);
+    if (g > 7) g = 7;
+    rfid.PCD_SetAntennaGain(g << 4);
+    rfid.PCD_AntennaOn();
+    Serial.print(F("#gain set to ")); Serial.println((rfid.PCD_GetAntennaGain() >> 4) & 0x07);
+    return;
+  }
+#endif
   Serial.print(F("ERR,")); Serial.println(line);
 }
 
@@ -374,6 +508,13 @@ void setup() {
 #if HAS_RFID
   SPI.begin();
   rfid.PCD_Init();
+  /* Leave the receiver at the library default gain. Cranking it to RxGain_max
+     was tried and made things WORSE: with a tag held against the coil the
+     receiver overloads and the reply comes back malformed, which surfaces as
+     "Error in communication" on REQA and a failed read. The stock reference
+     sketch (firmware/rfid_read_test) reads reliably at the default, so match it.
+     Use "GAIN,<0-7>" at runtime to experiment; don't hardcode a raise without
+     measuring full reads, not just REQA. */
 #endif
 #if HAS_BUZZER
   pinMode(BUZZER_PIN, OUTPUT);
@@ -399,4 +540,31 @@ void setup() {
 
 void loop() {
   handleSerial();
+
+#if HAS_RFID
+  /* Idle tag reporting. Useful on its own (tap a tag any time to see its UID,
+     no 20s window to race), and it is the hook the bridge will need once
+     Mega 2 exists: that board has no reader, so a slot change reported there
+     has to be paired with a SCAN seen here.
+     Unsolicited SCAN lines are informational — the bridge only acts on DONE. */
+  static char idleTag[32];
+  static char lastIdleTag[32] = "";
+  static unsigned long lastIdleScan = 0, lastIdleReport = 0;
+  if (idleScanEnabled && millis() - lastIdleScan >= 200) {
+    lastIdleScan = millis();
+    if (readTagInto(idleTag, sizeof(idleTag))) {
+      /* cardPresent() now wakes HALTed cards, so a tag parked on the reader
+         reads on every pass. Report a given UID at most once every 2s. */
+      bool repeat = (strcmp(idleTag, lastIdleTag) == 0) &&
+                    (millis() - lastIdleReport < 2000);
+      if (!repeat) {
+        strncpy(lastIdleTag, idleTag, sizeof(lastIdleTag) - 1);
+        lastIdleTag[sizeof(lastIdleTag) - 1] = '\0';
+        lastIdleReport = millis();
+        Serial.print(F("SCAN,")); Serial.println(idleTag);
+        beep(40);
+      }
+    }
+  }
+#endif
 }

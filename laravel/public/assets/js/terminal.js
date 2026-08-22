@@ -528,7 +528,11 @@
           screenReceipt(mode, { tool: changed ? changed.tool : null }, cmd);
         }
       })["catch"](function () {});
-    }, 2000);
+      // 600ms, not 2000: the borrow is already saved server-side by the time we
+      // poll, so this interval IS the delay the student sees after tapping.
+      // verify-student is a couple of indexed queries on localhost, so the extra
+      // rate costs nothing worth measuring.
+    }, 600);
   }
 
   /* ---- 06 · Receipt ----------------------------------------------------- */
