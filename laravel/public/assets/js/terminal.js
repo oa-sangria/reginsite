@@ -453,7 +453,6 @@
   /* ---- 05 · Await the physical confirm (RFID via the bridge) ------------ */
   function screenAwait(mode, cmd, tag) {
     disarmIdle();                        // a door is open — never time out here
-    var pre = S.borrowed.length;
     var borrowing = mode === "borrow";
     hint(borrowing ? "Waiting for the tool to be removed" : "Waiting for the tool to be replaced");
 
@@ -498,7 +497,7 @@
 
     on("cancelBtn", function () {
       stopPoll();
-      call("confirm", { command_id: cmd.commandId, timeout: true })["catch"](function () {});
+      call("confirm", { command_id: cmd.commandId, timeout: true, reason: "cancelled" })["catch"](function () {});
       screenHome();
     });
     on("simBtn", function () {
@@ -515,23 +514,44 @@
       });
     });
 
-    // Real hardware path: the bridge confirms server-side, so watch for the
-    // student's open-loan set to change, then move on.
+    // Real hardware path: the bridge confirms server-side. Poll the COMMAND, not
+    // the loan list — a loan only appears on success, so watching it alone
+    // leaves the screen stuck on "Take your tool" after a timeout or a rejected
+    // tag, with the door already locked and the student none the wiser.
+    //
+    // 600ms: the outcome is already recorded server-side by the time we poll,
+    // so this interval IS the delay the student sees. command-status is one
+    // indexed lookup on localhost.
+    var settling = false;
     pollTimer = setInterval(function () {
-      call("verify-student", { qr: S.student.studentId }).then(function (j) {
-        if (!j.ok) return;
-        if (j.borrowed.length !== pre) {
-          var changed = borrowing
-            ? j.borrowed.filter(function (b) { return !S.borrowed.some(function (o) { return o.txId === b.txId; }); })[0]
-            : S.borrowed.filter(function (o) { return !j.borrowed.some(function (b) { return b.txId === o.txId; }); })[0];
-          S.borrowed = j.borrowed; S.available = j.availableByLocker;
-          screenReceipt(mode, { tool: changed ? changed.tool : null }, cmd);
+      if (settling) return;
+      call("command-status", { command_id: cmd.commandId }).then(function (c) {
+        if (!c.ok || settling) return;
+
+        if (c.status === "done") {
+          settling = true;
+          // Refresh the session so the receipt and the menu reflect the new loan.
+          call("verify-student", { qr: S.student.studentId }).then(function (j) {
+            if (j.ok) { S.borrowed = j.borrowed; S.available = j.availableByLocker; S.eligibility = j.eligibility; }
+            screenReceipt(mode, { tool: c.tool }, cmd);
+          })["catch"](function () { screenReceipt(mode, { tool: c.tool }, cmd); });
+
+        } else if (c.status === "timeout") {
+          settling = true;
+          screenStop(
+            "Door locked again",
+            (c.note || "No tag was scanned in time.") + " Start again when you're ready.",
+            screenHome);
+
+        } else if (c.status === "failed") {
+          settling = true;
+          screenStop(
+            borrowing ? "That isn't the right tool" : "Tag not recognised",
+            (c.note || "The tag was rejected.") + " The door has re-locked — please try again.",
+            screenHome);
         }
+        // pending / sent: keep waiting.
       })["catch"](function () {});
-      // 600ms, not 2000: the borrow is already saved server-side by the time we
-      // poll, so this interval IS the delay the student sees after tapping.
-      // verify-student is a couple of indexed queries on localhost, so the extra
-      // rate costs nothing worth measuring.
     }, 600);
   }
 

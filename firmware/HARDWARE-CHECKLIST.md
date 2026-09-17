@@ -12,11 +12,17 @@ Upload one sketch at a time, open **Serial Monitor @ 115200**, line ending **New
 
 ## 0. Power — before anything else
 
+Two separate 5 V rails: the **LM2596 feeds the relays**, a **second buck feeds the ultrasonics**.
+
 - ☐ SMPS output ≈ **12 V**
-- ☐ LM2596 input ≈ **12 V**
-- ☐ LM2596 output adjusted to **5.0 V** — measured with **nothing connected to it**
+- ☐ LM2596 (relay rail) output adjusted to **5.0 V** — measured with **nothing connected**
+- ☐ Sensor buck output adjusted to **5.0 V** — measured with **nothing connected**
       (these ship at an arbitrary voltage; a 12 V passthrough kills all sensors at once)
-- ☐ Common ground between LM2596 output, relay board, sensors and the Mega
+- ☐ The two +5 V outputs are **NOT** connected to each other
+- ☐ **Continuity between the sensor buck's GND and a Mega GND pin** ← the #1 cause of
+      "every sensor reads nothing": ECHO is measured relative to the sensor's ground, so a
+      separate ground means the Mega has no reference
+- ☐ Continuity between the LM2596 GND, relay-board GND, and Mega GND
 - ☐ Cabinet metalwork is **not** used as an electrical return; no mounting screw shorts a rail
 
 ## A. Boot safety — the one that prevents damage

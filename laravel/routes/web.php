@@ -40,6 +40,7 @@ Route::prefix('api')->group(function () {
         Route::post('return-request', [Esp32Controller::class, 'returnRequest']);
         Route::get('commands', [Esp32Controller::class, 'commands']);
         Route::post('confirm', [Esp32Controller::class, 'confirm']);
+        Route::post('command-status', [Esp32Controller::class, 'commandStatus']);
         // immediate (simulator / direct tests)
         Route::post('borrow', [Esp32Controller::class, 'borrow']);
         Route::post('return', [Esp32Controller::class, 'returnTool']);

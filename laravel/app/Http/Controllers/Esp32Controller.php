@@ -174,34 +174,77 @@ class Esp32Controller extends Controller
         if (!$cmd) {
             throw new HttpException(404, 'Unknown command');
         }
+
+        // Terminal states are final. The bridge's stale-command watchdog can fire
+        // a late timeout after a real DONE or a rejected tag; it must not undo them.
+        if ($cmd->isTerminal()) {
+            return response()->json(['ok' => true, 'result' => 'already ' . $cmd->status, 'status' => $cmd->status]);
+        }
+
         if ($request->boolean('timeout')) {
-            $cmd->update(['status' => 'done']);
-            return response()->json(['ok' => true, 'result' => 'cancelled (timeout)']);
+            $reason = (string) $request->input('reason', 'timeout');
+            $notes = [
+                'timeout'   => 'No tag was scanned before the door re-locked',
+                'nowire'    => 'That locker is not connected to this controller',
+                'stale'     => 'The controller stopped responding',
+                'cancelled' => 'Cancelled at the kiosk',
+            ];
+            $cmd->update(['status' => 'timeout', 'note' => $notes[$reason] ?? $reason]);
+            return response()->json(['ok' => true, 'result' => 'cancelled (' . $reason . ')', 'status' => 'timeout']);
         }
 
         $uid = (string) $request->input('uid', '');
         $tool = Tool::findByTag($uid);
         $student = Student::find($cmd->student_id);
 
+        // A scan the server rejects is terminal too: by the time DONE reaches us
+        // the firmware has already re-locked the door. Record why, so the kiosk
+        // can tell the student instead of waiting for a borrow that never comes.
+        $fail = function (int $code, string $msg) use ($cmd) {
+            $cmd->update(['status' => 'failed', 'note' => $msg]);
+            throw new HttpException($code, $msg);
+        };
+
         if ($cmd->mode === 'borrow') {
-            if (!$tool || (int) $tool->locker_id !== (int) $cmd->locker_id) {
-                throw new HttpException(422, 'Scanned tag is not a tool from this locker');
+            if (!$tool) {
+                $fail(422, 'That tag is not registered to any tool');
+            }
+            if ((int) $tool->locker_id !== (int) $cmd->locker_id) {
+                $fail(422, $tool->name . ' belongs in Locker ' . $tool->locker_id . ', not this one');
             }
             if ($tool->status !== 'available') {
-                throw new HttpException(409, $tool->name . ' is not available (' . $tool->status . ')');
+                $fail(409, $tool->name . ' is not available (' . $tool->status . ')');
             }
             $result = $this->system->borrow($student, $tool->id);
             $cmd->update(['status' => 'done', 'tool_id' => $tool->id, 'transaction_id' => $result['txId']]);
-            return response()->json(['ok' => true, 'action' => 'borrow', 'tool' => $tool->name, 'result' => $result]);
+            return response()->json(['ok' => true, 'action' => 'borrow', 'tool' => $tool->name, 'result' => $result, 'status' => 'done']);
         }
 
         // return
         if (!$tool) {
-            throw new HttpException(422, 'Scanned tag not recognized');
+            $fail(422, 'That tag is not registered to any tool');
         }
         $result = $this->system->returnTool($student, $tool->id);
         $cmd->update(['status' => 'done', 'tool_id' => $tool->id]);
-        return response()->json(['ok' => true, 'action' => 'return', 'tool' => $tool->name, 'result' => $result]);
+        return response()->json(['ok' => true, 'action' => 'return', 'tool' => $tool->name, 'result' => $result, 'status' => 'done']);
+    }
+
+    // 4b) Kiosk polls this while a door is open, so it can react to a timeout or
+    //     a rejected tag instead of waiting for a loan that will never appear. -- //
+    public function commandStatus(Request $request)
+    {
+        $cmd = DeviceCommand::find((int) $request->input('command_id', 0));
+        if (!$cmd) {
+            throw new HttpException(404, 'Unknown command');
+        }
+        $tool = $cmd->tool_id ? Tool::find($cmd->tool_id) : null;
+        return response()->json([
+            'ok' => true,
+            'status' => $cmd->status,
+            'note' => $cmd->note,
+            'tool' => $tool ? $tool->name : null,
+            'txId' => $cmd->transaction_id ? (string) $cmd->transaction_id : null,
+        ]);
     }
 
     // --- Immediate borrow/return (simulator / direct tests) ----------------- //

@@ -66,10 +66,13 @@
   #define BUZZER_PIN 16     // NOTE: D16 is TX2 — never add a Serial2 device on this board
 #endif
 
-/* Flip to true once a cabinet's sensors are physically wired. While false the
-   firmware confirms on the RFID tag alone (slot reported as 0), which is the
-   safe bring-up path before the ultrasonics go in. */
-const bool SENSORS_ENABLED = false;
+/* Keep this TRUE. It makes setup() drive every TRIG LOW from boot, which these
+   HC-SR04 clones require — a TRIG left floating and only claimed at read time
+   leaves the module ignoring pulses. A cabinet whose sensors do not answer at
+   open time automatically falls back to tag-only, so enabling is safe even for
+   cabinets with no sensors wired yet. The `false` path only existed to protect
+   the old D22/D23 relay harness, which is gone. */
+const bool SENSORS_ENABLED = true;
 
 /* BRING-UP DIAGNOSTIC — set false for production.
    Allows "SIMTAG,<uid>" over serial to stand in for a physical tag scan, so the
@@ -84,6 +87,11 @@ const bool ALLOW_SIMTAG = true;
    they collide into a malformed ATQA that looks exactly like a hardware fault.
    Any measurement taken with this on is measuring the firmware, not the reader. */
 bool idleScanEnabled = true;
+
+/* SLOTDBG,1 — stream every slot sample during an OPEN window as
+   "#slot,<cab>,<slot>,<cm>,<raw>,<filled>" so threshold problems are visible
+   instead of inferred. Off by default; it is chatty. */
+bool slotDebug = true;     // on during bring-up; set false once slots are trusted
 
 const uint8_t MAX_SLOTS = 4;
 
@@ -126,9 +134,14 @@ const Cabinet CABS[NUM_CABS] = {
 #endif
 
 const bool  ACTIVE_LOW = true;                 // relay board polarity
-const float PRESENT_CM = 8.0;                  // <= this = tool in the slot
-const float ABSENT_CM  = 12.0;                 // >= this = slot empty
-                                               // between the two: hold previous state
+/* Calibrated on Locker 2 slot 1 (2026-09-15) with the tool actually in the
+   beam: tool IN 4.0cm (3.9-4.4), tool OUT 9.3cm (the shelf behind it). A tool
+   too small to reach the beam reads identically in and out — the sensor must
+   see the tool's BODY, not the shelf beside it. Thresholds sit in the gap;
+   readings between them hold prior state. These are global for now; slots
+   whose empty-shelf distance differs will need their own pair. */
+const float PRESENT_CM = 5.9;                  // <= this = tool in the slot
+const float ABSENT_CM  = 7.4;                  // >= this = slot empty
 const uint8_t       AGREE_N          = 2;      // samples that must agree to flip a slot
 const uint8_t       MISS_LIMIT       = 3;      // consecutive no-echoes before flagging
 const unsigned long ECHO_TIMEOUT_US  = 12000;  // ~2 m; a dead sensor costs 12ms not 30
@@ -145,8 +158,9 @@ int8_t cabIndex(uint8_t cabNumber) {
 inline uint8_t relayIdle()   { return ACTIVE_LOW ? HIGH : LOW; }
 inline uint8_t relayActive() { return ACTIVE_LOW ? LOW  : HIGH; }
 
-void lockCabinet(uint8_t i)   { digitalWrite(CABS[i].relayPin, relayIdle());   }
-void unlockCabinet(uint8_t i) { digitalWrite(CABS[i].relayPin, relayActive()); }
+/* relayPin 0 means "no relay wired" — never touch pin 0, it is serial RX. */
+void lockCabinet(uint8_t i)   { if (CABS[i].relayPin) digitalWrite(CABS[i].relayPin, relayIdle());   }
+void unlockCabinet(uint8_t i) { if (CABS[i].relayPin) digitalWrite(CABS[i].relayPin, relayActive()); }
 
 /* Must run BEFORE anything else in setup(). At reset every pin is a high-Z
    input; calling pinMode(OUTPUT) latches whatever PORTx holds, which is 0 —
@@ -160,6 +174,7 @@ void unlockCabinet(uint8_t i) { digitalWrite(CABS[i].relayPin, relayActive()); }
 void relaysSafeInit() {
   for (uint8_t i = 0; i < NUM_CABS; i++) {
     uint8_t p = CABS[i].relayPin;
+    if (!p) continue;                       // no relay on this cabinet
     digitalWrite(p, relayIdle());
     pinMode(p, OUTPUT);
     digitalWrite(p, relayIdle());
@@ -208,20 +223,31 @@ float pingCm(const Slot &s) {
    sample at all, so it must not feed the debouncer. */
 void sampleSlot(const Cabinet &c, uint8_t s, SlotState *st) {
   float d = pingCm(c.slot[s]);
-  if (d < 0) { if (st[s].miss < 255) st[s].miss++; return; }
+  if (d < 0) {
+    if (st[s].miss < 255) st[s].miss++;
+    if (slotDebug) { Serial.print(F("#slot,")); Serial.print(c.number); Serial.print(','); Serial.print(s + 1); Serial.println(F(",none")); }
+    return;
+  }
   st[s].miss = 0;
 
-  bool raw;
-  if      (d <= PRESENT_CM) raw = true;
-  else if (d >= ABSENT_CM)  raw = false;
-  else return;                                  // hysteresis band — hold previous
+  bool raw; char rawc;
+  if      (d <= PRESENT_CM) { raw = true;  rawc = 'P'; }
+  else if (d >= ABSENT_CM)  { raw = false; rawc = 'A'; }
+  else                      { rawc = '-'; }
 
-  if (raw == st[s].cand) {
-    if (st[s].agree < AGREE_N) st[s].agree++;
-    if (st[s].agree >= AGREE_N) st[s].filled = raw;
-  } else {
-    st[s].cand = raw;
-    st[s].agree = 1;
+  if (rawc != '-') {
+    if (raw == st[s].cand) {
+      if (st[s].agree < AGREE_N) st[s].agree++;
+      if (st[s].agree >= AGREE_N) st[s].filled = raw;
+    } else {
+      st[s].cand = raw;
+      st[s].agree = 1;
+    }
+  }
+  if (slotDebug) {
+    Serial.print(F("#slot,")); Serial.print(c.number); Serial.print(','); Serial.print(s + 1);
+    Serial.print(','); Serial.print(d, 1); Serial.print(','); Serial.print(rawc);
+    Serial.print(F(",filled=")); Serial.println(st[s].filled ? 1 : 0);
   }
 }
 
@@ -363,10 +389,46 @@ void selfTest() {
   Serial.println(F("SELFTEST,done"));
 }
 
+/* ---- USS: read every defined sensor once, for bring-up validation --------- */
+void ussScan() {
+  Serial.println(F("#uss scan"));
+  for (uint8_t i = 0; i < NUM_CABS; i++) {
+    for (uint8_t s = 0; s < CABS[i].slots; s++) {
+      const Slot &sl = CABS[i].slot[s];
+      if (!sl.trig || !sl.echo) continue;
+
+      pinMode(sl.trig, OUTPUT); digitalWrite(sl.trig, LOW);
+      pinMode(sl.echo, INPUT);
+      delay(5);
+      float d = pingCm(sl);
+
+      Serial.print(F("USS,")); Serial.print(CABS[i].number);
+      Serial.print(',');       Serial.print(s + 1);
+      Serial.print(',');       Serial.print(sl.trig);
+      Serial.print('/');       Serial.print(sl.echo);
+      Serial.print(',');
+      if (d < 0) Serial.println(F("none")); else Serial.println(d, 1);
+
+      /* While sensors are not yet enabled, put the pins back exactly as
+         relaysSafeInit() left them: D22/D23 parked at the relay idle level in
+         case the old harness is still on them, everything else high-Z. */
+      if (!SENSORS_ENABLED) {
+        uint8_t pins[2] = { sl.trig, sl.echo };
+        for (uint8_t k = 0; k < 2; k++) {
+          if (pins[k] == 22 || pins[k] == 23) { pinMode(pins[k], OUTPUT); digitalWrite(pins[k], relayIdle()); }
+          else                                 { pinMode(pins[k], INPUT); }
+        }
+      }
+      delay(SENSOR_SETTLE_MS);
+    }
+  }
+  Serial.println(F("USS,done"));
+}
+
 /* ---- Handle one OPEN command --------------------------------------------- */
 void handleOpen(uint8_t cabNum, const char *mode) {
   int8_t ci = cabIndex(cabNum);
-  if (ci < 0) {                                  // routing error: other board's cabinet
+  if (ci < 0 || CABS[ci].relayPin == 0) {        // other board's cabinet, or no relay wired
     Serial.print(F("NOWIRE,")); Serial.println(cabNum);
     beep(50, 3);
     return;
@@ -379,7 +441,23 @@ void handleOpen(uint8_t cabNum, const char *mode) {
   bool baseline[MAX_SLOTS];
   if (haveSensors) {
     baselineSweep(c, st);
-    for (uint8_t s = 0; s < c.slots; s++) baseline[s] = st[s].filled;
+    /* If not one slot answered a single ping, this cabinet's sensors are not
+       wired (or dead). Degrade to tag-only rather than demanding a slot change
+       that can never be seen — otherwise every borrow here would time out. */
+    bool anyAlive = false;
+    for (uint8_t s = 0; s < c.slots; s++) if (st[s].miss < AGREE_N) anyAlive = true;
+    if (!anyAlive) {
+      haveSensors = false;
+      Serial.print(F("#cab ")); Serial.print(cabNum);
+      Serial.println(F(": no sensor echo - confirming on tag only"));
+    } else {
+      for (uint8_t s = 0; s < c.slots; s++) baseline[s] = st[s].filled;
+      if (slotDebug) {
+        Serial.print(F("#baseline,")); Serial.print(cabNum);
+        for (uint8_t s = 0; s < c.slots; s++) { Serial.print(','); Serial.print(baseline[s] ? F("IN") : F("out")); }
+        Serial.println();
+      }
+    }
   }
 
   unlockCabinet(ci);
@@ -477,11 +555,183 @@ void handleSerial() {
   if (strcmp(line, "WHO") == 0)   { announce(); return; }
   if (strcmp(line, "ABORT") == 0) { return; }        // nothing is open
   if (strcmp(line, "SELFTEST") == 0) { selfTest(); return; }
+  if (strcmp(line, "USS") == 0)      { ussScan();  return; }
+  /* SCANECHO — find pins that have a sensor ECHO on them. An HC-SR04 actively
+     holds ECHO LOW between pings; an unconnected pin floats and a pull-up reads
+     it HIGH. So INPUT_PULLUP + read LOW means "something is driving this pin".
+     Never drives anything, so it is safe on every pin we probe. Skips serial,
+     SPI, the relay pins and the buzzer. */
+  if (strcmp(line, "SCANECHO") == 0) {
+    Serial.println(F("#scanecho"));
+    for (uint8_t p = 2; p <= 69; p++) {
+      if (p == 5 || p == 6 || p == 7 || p == 8 || p == 16) continue;      // RST, relays, buzzer
+      if (p >= 50 && p <= 53) continue;                                    // SPI
+      if (p == 66 || p == 67) continue;                                    // A12/A13 relays
+      pinMode(p, INPUT_PULLUP);
+      delayMicroseconds(200);
+      int v = digitalRead(p);
+      if (!SENSORS_ENABLED && (p == 22 || p == 23)) { pinMode(p, OUTPUT); digitalWrite(p, relayIdle()); }
+      else pinMode(p, INPUT);
+      if (v == LOW) { Serial.print(F("ECHOPIN,")); Serial.println(p); }
+    }
+    Serial.println(F("SCANECHO,done"));
+    return;
+  }
+  /* SCANALL — like SCANECHO but skips only D0/D1, so a sensor wire that landed
+     on a relay, SPI, RST or buzzer pin by mistake still shows up. Read-only
+     with a pull-up (HIGH = relay off), and every pin is put back afterwards. */
+  if (strcmp(line, "SCANALL") == 0) {
+    Serial.println(F("#scanall"));
+    for (uint8_t p = 2; p <= 69; p++) {
+      pinMode(p, INPUT_PULLUP);
+      delayMicroseconds(200);
+      int v = digitalRead(p);
+      if (v == LOW) { Serial.print(F("LOWPIN,")); Serial.println(p); }
+    }
+    relaysSafeInit();                                   // relays back to idle OUTPUT
+#if HAS_BUZZER
+    pinMode(BUZZER_PIN, OUTPUT); digitalWrite(BUZZER_PIN, LOW);
+#endif
+#if HAS_RFID
+    SPI.begin(); rfid.PCD_Init();                       // SPI pins back to the bus
+#endif
+    for (uint8_t i = 0; i < NUM_CABS; i++)
+      for (uint8_t s = 0; s < CABS[i].slots; s++) {
+        if (CABS[i].slot[s].trig) { pinMode(CABS[i].slot[s].trig, OUTPUT); digitalWrite(CABS[i].slot[s].trig, LOW); }
+        if (CABS[i].slot[s].echo) pinMode(CABS[i].slot[s].echo, INPUT);
+      }
+    Serial.println(F("SCANALL,done"));
+    return;
+  }
+  /* TRACE,<trig>,<echo> — trigger once and record what ECHO actually does for
+     the next 60ms. Separates "never fired" (ECHO flat) from "fired, nothing in
+     range" (ECHO rose and stayed up), which pulseIn reports identically. */
+  if (strncmp(line, "TRACE,", 6) == 0) {
+    char *p = line + 6; char *c = strchr(p, ',');
+    if (!c) { Serial.println(F("ERR,TRACE needs trig,echo")); return; }
+    *c = '\0';
+    uint8_t t = (uint8_t) atoi(p), e = (uint8_t) atoi(c + 1);
+    if (!t || !e) { Serial.println(F("ERR,bad pins")); return; }
+    pinMode(t, OUTPUT); digitalWrite(t, LOW);
+    pinMode(e, INPUT);
+    delay(5);
+    int before = digitalRead(e);
+    digitalWrite(t, HIGH); delayMicroseconds(10); digitalWrite(t, LOW);
+    unsigned long t0 = micros(), rose = 0, fell = 0;
+    int last = digitalRead(e);
+    while (micros() - t0 < 60000UL) {
+      int v = digitalRead(e);
+      if (v != last) {
+        if (v == HIGH && !rose) rose = micros() - t0;
+        if (v == LOW  && rose && !fell) { fell = micros() - t0; break; }
+        last = v;
+      }
+    }
+    int after = digitalRead(e);
+    Serial.print(F("TRACE,")); Serial.print(t); Serial.print('/'); Serial.print(e);
+    Serial.print(F(",before=")); Serial.print(before);
+    Serial.print(F(",rose_us=")); Serial.print(rose);
+    Serial.print(F(",fell_us=")); Serial.print(fell);
+    Serial.print(F(",after=")); Serial.print(after);
+    if (!rose)            Serial.println(F(",NEVER_FIRED"));
+    else if (!fell)       Serial.println(F(",FIRED_NO_RETURN (echo still high at 60ms)"));
+    else { Serial.print(F(",echo=")); Serial.print((fell - rose) * 0.0343 / 2.0, 1); Serial.println(F("cm")); }
+    digitalWrite(t, LOW);                  // keep TRIG driven — see PING
+    return;
+  }
+  /* HOLD,<pin>,<0|1> — drive a pin and leave it there, so a meter can be put
+     on the far end of the wire. HOLD,<pin>,x releases it back to input. */
+  if (strncmp(line, "HOLD,", 5) == 0) {
+    char *p = line + 5; char *c = strchr(p, ',');
+    if (!c) { Serial.println(F("ERR,HOLD needs pin,0|1|x")); return; }
+    *c = '\0';
+    uint8_t pin = (uint8_t) atoi(p);
+    if (pin < 2 || pin > 69 || pin == 5 || (pin >= 50 && pin <= 53)) { Serial.println(F("ERR,unsafe pin")); return; }
+    char mode = c[1];
+    if (mode == 'x') { pinMode(pin, INPUT); Serial.print(F("HOLD,")); Serial.print(pin); Serial.println(F(",released")); return; }
+    pinMode(pin, OUTPUT); digitalWrite(pin, mode == '1' ? HIGH : LOW);
+    Serial.print(F("HOLD,")); Serial.print(pin); Serial.println(mode == '1' ? F(",HIGH") : F(",LOW"));
+    return;
+  }
+  /* LINK,<a>,<b> — are two pins shorted together? Drive <a> HIGH then LOW and
+     watch whether <b> (as input) follows it. A sensor between them presents
+     high impedance so <b> stays put; a short drags it along. */
+  if (strncmp(line, "LINK,", 5) == 0) {
+    char *p = line + 5; char *c = strchr(p, ',');
+    if (!c) { Serial.println(F("ERR,LINK needs a,b")); return; }
+    *c = '\0';
+    uint8_t a = (uint8_t) atoi(p), b = (uint8_t) atoi(c + 1);
+    if (a < 2 || a > 69 || b < 2 || b > 69 || a == b || (a >= 50 && a <= 53)) { Serial.println(F("ERR,bad pins")); return; }
+    pinMode(b, INPUT);
+    pinMode(a, OUTPUT);
+    digitalWrite(a, HIGH); delayMicroseconds(50); int hi = digitalRead(b);
+    digitalWrite(a, LOW);  delayMicroseconds(50); int lo = digitalRead(b);
+    pinMode(a, INPUT);
+    Serial.print(F("LINK,")); Serial.print(a); Serial.print(','); Serial.print(b);
+    Serial.print(F(",b_when_a_high=")); Serial.print(hi);
+    Serial.print(F(",b_when_a_low="));  Serial.print(lo);
+    Serial.println((hi == 1 && lo == 0) ? F(",SHORTED") : F(",independent"));
+    return;
+  }
+  /* PULSE,<pin>,<ms> — drive one pin LOW for <ms> then back HIGH and release.
+     For locating a relay IN wire: pulse a candidate and listen for the click. */
+  if (strncmp(line, "PULSE,", 6) == 0) {
+    char *p = line + 6; char *c = strchr(p, ',');
+    uint8_t pin = (uint8_t) atoi(p);
+    int ms = c ? atoi(c + 1) : 500;
+    if (pin < 2 || pin > 69 || pin == 5 || (pin >= 50 && pin <= 53)) { Serial.println(F("ERR,unsafe pin")); return; }
+    if (ms < 20) ms = 20; if (ms > 3000) ms = 3000;
+    digitalWrite(pin, HIGH); pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);  delay(ms);
+    digitalWrite(pin, HIGH); delay(20);
+    pinMode(pin, INPUT);
+    Serial.print(F("PULSE,")); Serial.print(pin); Serial.println(F(",done"));
+    return;
+  }
+  /* PING,<trig>,<echo> — read one arbitrary pair. Finds sensors wired to pins
+     the table doesn't expect (e.g. the old bench order with ECHO below TRIG). */
+  if (strncmp(line, "PING,", 5) == 0) {
+    char *p = line + 5; char *c = strchr(p, ',');
+    if (!c) { Serial.println(F("ERR,PING needs trig,echo[,pulse_us]")); return; }
+    *c = '\0';
+    char *c2 = strchr(c + 1, ',');
+    unsigned int pulseUs = 10;
+    if (c2) { *c2 = '\0'; pulseUs = (unsigned int) atoi(c2 + 1); if (pulseUs < 5) pulseUs = 5; if (pulseUs > 5000) pulseUs = 5000; }
+    Slot sl = { (uint8_t) atoi(p), (uint8_t) atoi(c + 1) };
+    if (!sl.trig || !sl.echo) { Serial.println(F("ERR,bad pins")); return; }
+    pinMode(sl.trig, OUTPUT); digitalWrite(sl.trig, LOW);
+    pinMode(sl.echo, INPUT);
+    delay(5);
+    /* Optional third arg: trigger pulse width. HC-SR04 spec is 10us; some
+       clone chips need much longer, and the only way to find out is to try. */
+    float d;
+    if (pulseUs == 10) d = pingCm(sl);
+    else {
+      digitalWrite(sl.trig, LOW);  delayMicroseconds(2);
+      digitalWrite(sl.trig, HIGH); delayMicroseconds(pulseUs);
+      digitalWrite(sl.trig, LOW);
+      unsigned long dur = pulseIn(sl.echo, HIGH, 30000);
+      d = dur == 0 ? -1.0 : dur * 0.0343 / 2.0;
+    }
+    Serial.print(F("PING,")); Serial.print(sl.trig); Serial.print('/'); Serial.print(sl.echo);
+    Serial.print(',');
+    if (d < 0) Serial.println(F("none")); else Serial.println(d, 1);
+    /* Leave TRIG driven LOW. Releasing it to a floating input between reads
+       puts these HC-SR04 clones into a state where they ignore the next pulse —
+       which made this very command report "no echo" on perfectly good sensors. */
+    digitalWrite(sl.trig, LOW);
+    return;
+  }
 #if HAS_RFID
   /* GAIN,<0-7> — tune receiver gain live. Too LOW and a tag out of range never
      answers (REQA Timeout); too HIGH and a tag pressed against the coil can
      overload the receiver, so the ATQA comes back malformed (REQA Error).
      The right value is hardware- and mounting-specific, so sweep it in place. */
+  if (strncmp(line, "SLOTDBG,", 8) == 0) {
+    slotDebug = (atoi(line + 8) != 0);
+    Serial.print(F("#slotdbg=")); Serial.println(slotDebug ? 1 : 0);
+    return;
+  }
   if (strncmp(line, "IDLESCAN,", 9) == 0) {
     idleScanEnabled = (atoi(line + 9) != 0);
     Serial.print(F("#idlescan=")); Serial.println(idleScanEnabled ? 1 : 0);

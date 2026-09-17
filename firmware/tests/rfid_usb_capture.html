@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>USB RFID Reader Capture — reginsite</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, Arial, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 16px; }
+    h1 { font-size: 20px; } p { color: #555; }
+    textarea { width: 100%; height: 90px; font-family: Consolas, monospace; font-size: 14px; padding: 10px; }
+    pre { background: #14121c; color: #d8d3e8; padding: 14px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; }
+    table { border-collapse: collapse; width: 100%; font-size: 14px; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; font-family: Consolas, monospace; }
+    th { background: #f4f4f4; font-family: system-ui, sans-serif; }
+    tr.hit td { background: #e6f7e6; font-weight: 600; }
+    .btn { padding: 8px 14px; border: 1px solid #ccc; border-radius: 8px; background: #f4f4f4; cursor: pointer; }
+    .lbl { font-weight: 600; margin-top: 18px; }
+    .ok { color: #1a7f37; } .bad { color: #b42318; }
+  </style>
+</head>
+<body>
+  <h1>USB RFID Reader Capture (keyboard-wedge, VID FFFF / PID 0035)</h1>
+  <p>The USB reader shows up in Windows as a <b>USB HID Keyboard</b>: it types the tag ID and then
+     presses Enter. Click the box below, then hold a tool tag on the reader. Each scan is decoded
+     every common way (hex / decimal, normal / reversed byte order) and checked against the
+     34 seeded tags from <code>DatabaseSeeder.php</code>, so you can see at once whether the
+     reader works, whether it reads the existing 13.56 MHz Mifare tags, and which output format
+     it uses.</p>
+
+  <textarea id="box" placeholder="Click here, then scan a tag…" autofocus></textarea>
+  <p><button class="btn" onclick="clearAll()">Clear</button></p>
+
+  <div class="lbl">Last scan — raw (escaped):</div>
+  <pre id="escaped">—</pre>
+
+  <div class="lbl">Keystroke timing:</div>
+  <pre id="timing">—</pre>
+
+  <div class="lbl">Decodings tried:</div>
+  <table>
+    <thead><tr><th>Interpretation</th><th>Normalized UID</th><th>Seeded tool</th></tr></thead>
+    <tbody id="decodes"><tr><td colspan="3">—</td></tr></tbody>
+  </table>
+
+  <div class="lbl">Scan log:</div>
+  <pre id="log">—</pre>
+
+  <script>
+    // Seeded tags, verbatim from laravel/database/seeders/DatabaseSeeder.php.
+    var SEED = {
+      1:  ['Pliers',          ['E5:77:7B:06', 'CD:5B:7B:06', '93:0E:79:06', '25:F8:7A:06']],
+      2:  ['Side Cutter',     ['1A:D9:78:06', '5C:D8:7A:06', 'BA:F0:7B:06', '63:75:7B:06']],
+      3:  ['Wire Crimper',    ['CB:56:CF:83', '63:98:66:06', 'E1:C9:66:06', '87:3A:7C:06']],
+      4:  ['Clamp Meter',     ['CE:B8:7C:06', '4E:B0:78:06', 'D6:42:7B:06', '72:8B:79:06']],
+      5:  ['Multimeter',      ['C5:CB:7A:06', '0D:6B:7A:06', 'F4:38:7C:06', 'DE:73:7B:06']],
+      6:  ['Screwdriver Set', ['F2:01:7A:06', '0C:D7:7B:06', '81:1C:7B:06', '8C:B3:7C:06']],
+      7:  ['Wire Stripper',   ['1E:3C:78:06', '74:D6:7B:06', '56:CD:7C:06', '3B:86:7C:06']],
+      8:  ['Soldering Iron',  ['A7:45:64:06', 'E9:8C:7B:06', 'B7:5D:7A:06', 'DB:F0:7B:06']],
+      9:  ['Makita Drill',    ['92:E0:7C:06']],
+      10: ['Makita Drill',    ['41:3A:78:06']]
+    };
+    // Same normalization as Tool::normTag(): strip separators, uppercase.
+    function norm(s) { return String(s).replace(/[^0-9A-Fa-f]/g, '').toUpperCase(); }
+    var TAGS = {};
+    Object.keys(SEED).forEach(function (cab) {
+      var name = SEED[cab][0];
+      SEED[cab][1].forEach(function (uid, i) {
+        var no = (cab == 10) ? 2 : i + 1;
+        TAGS[norm(uid)] = name + ' ' + no + '  (cabinet ' + cab + ')';
+      });
+    });
+
+    function reverseBytes(hex) {
+      var out = '';
+      for (var i = hex.length - 2; i >= 0; i -= 2) out += hex.substr(i, 2);
+      return out;
+    }
+    function decToHex(dec, minBytes) {
+      var h = BigInt(dec).toString(16).toUpperCase();
+      if (h.length % 2) h = '0' + h;
+      while (h.length < minBytes * 2) h = '0' + h;
+      return h;
+    }
+
+    // Every plausible way a wedge reader might have encoded a 4-byte Mifare UID.
+    function decodings(raw) {
+      var s = raw.trim(), out = [];
+      function add(label, hex) { out.push([label, hex, TAGS[hex] || '']); }
+
+      if (/^[0-9A-Fa-f]+$/.test(s) && s.length >= 8) {
+        var h = s.toUpperCase();
+        add('hex as typed', h);
+        add('hex, bytes reversed', reverseBytes(h));
+        if (h.length > 8) {
+          add('hex, last 4 bytes', h.slice(-8));
+          add('hex, last 4 bytes reversed', reverseBytes(h.slice(-8)));
+        }
+      }
+      if (/^\d+$/.test(s)) {
+        var h4 = decToHex(s, 4);
+        add('decimal → hex (big-endian)', h4);
+        add('decimal → hex, bytes reversed', reverseBytes(h4));
+        if (h4.length > 8) {
+          add('decimal → hex, low 4 bytes', h4.slice(-8));
+          add('decimal → hex, low 4 bytes reversed', reverseBytes(h4.slice(-8)));
+        }
+      }
+      // "facility,card" style: 3-digit + 5-digit (or comma / space separated)
+      var m = s.match(/^(\d{1,5})[,\s](\d{1,5})$/);
+      if (m) {
+        var hi = decToHex(m[1], 1), lo = decToHex(m[2], 2);
+        add('facility,card → hex', (hi + lo).padStart(8, '0'));
+        add('facility,card → hex, reversed', reverseBytes((hi + lo).padStart(8, '0')));
+      }
+      if (/[^0-9A-Fa-f]/.test(s)) {
+        var n = norm(s);
+        if (n.length >= 8) { add('separators stripped', n); add('separators stripped, reversed', reverseBytes(n)); }
+      }
+      return out;
+    }
+
+    var box = document.getElementById('box');
+    var stamps = [];       // keydown timestamps for the scan in progress
+    var scans = [];
+
+    function render(raw) {
+      document.getElementById('escaped').textContent = JSON.stringify(raw);
+
+      var t = '';
+      if (stamps.length > 1) {
+        var gaps = [];
+        for (var i = 1; i < stamps.length; i++) gaps.push(stamps[i] - stamps[i - 1]);
+        t = 'keys: ' + stamps.length +
+            '   burst: ' + Math.round(stamps[stamps.length - 1] - stamps[0]) + ' ms' +
+            '   max gap between keys: ' + Math.round(Math.max.apply(null, gaps)) + ' ms' +
+            '   (a wedge parser can safely time out after ~' + Math.max(50, Math.round(Math.max.apply(null, gaps) * 3)) + ' ms)';
+      }
+      document.getElementById('timing').textContent = t || '—';
+
+      var rows = decodings(raw), tb = document.getElementById('decodes');
+      tb.innerHTML = '';
+      if (!rows.length) tb.innerHTML = '<tr><td colspan="3">No recognisable format (' + raw.length + ' chars)</td></tr>';
+      rows.forEach(function (r) {
+        var tr = document.createElement('tr');
+        if (r[2]) tr.className = 'hit';
+        tr.innerHTML = '<td>' + r[0] + '</td><td>' + r[1] + '</td><td>' + (r[2] || '<span class="bad">no match</span>') + '</td>';
+        tb.appendChild(tr);
+      });
+
+      var hit = rows.filter(function (r) { return r[2]; })[0];
+      scans.push(new Date().toLocaleTimeString() + '  ' + JSON.stringify(raw) +
+                 (hit ? '  ✔ ' + hit[2] + '  [' + hit[0] + ']' : '  ✘ not a seeded tag'));
+      document.getElementById('log').textContent = scans.join('\n');
+    }
+
+    function clearAll() { box.value = ''; stamps = []; box.focus(); }
+
+    box.addEventListener('keydown', function (e) {
+      if (e.key === 'Tab') { e.preventDefault(); box.value += '\t'; return; }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        var raw = box.value;
+        if (raw.length) render(raw);
+        box.value = ''; stamps = [];
+        return;
+      }
+      if (e.key.length === 1) stamps.push(performance.now());
+    });
+  </script>
+</body>
+</html>

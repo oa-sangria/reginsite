@@ -81,8 +81,25 @@ of `bridge.py` re-triggers it.
 The firmware closes the two windows it *can* reach (`relaysSafeInit()` runs before anything else
 and writes the idle level before `pinMode(OUTPUT)`), but it cannot touch the pre-`setup()` window.
 
-Also: the 20 sensors need their own 5 V rail (~15 mA each, ~300 mA peak) — more than the Mega's
-onboard regulator. Verify the LM2596 output really is 5.0 V *before* connecting anything to it.
+## Power — two 5 V rails, one ground
+
+| Rail | Source | Feeds |
+|---|---|---|
+| 12 V | SMPS | solenoids, through the relay contacts only |
+| 5 V **A** | LM2596 | relay-module VCC |
+| 5 V **B** | separate buck converter | every ultrasonic VCC (~15 mA each, ~300 mA peak on Mega 1) |
+| 3.3 V | Mega 1's 3.3 V pin | RC522 only — never 5 V |
+
+**Never join the two +5 V outputs.** Two regulators fighting over one rail is how one of them dies.
+
+**Every ground MUST be common** — both buck GND outputs, relay GND, every sensor GND, and the
+Mega's GND. This is the classic failure with a separate sensor supply: an HC-SR04's ECHO pin is a
+voltage *relative to the sensor's own ground*. If that ground isn't tied to the Mega's, the Mega
+has no reference for the signal and reads nothing, or floating-pin noise. Symptom: every sensor
+"no echo", maybe one or two showing impossible sub-2 cm readings. Check continuity between the
+sensor buck's GND and a Mega GND pin before suspecting anything else.
+
+Verify each buck reads 5.0 V with nothing attached before connecting its load.
 
 ## The flow (what the firmware does)
 1. Bridge sends `OPEN,<cabinet>,<borrow|return>` (because a student chose a tool on the touchscreen).

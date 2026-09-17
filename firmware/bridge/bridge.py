@@ -98,6 +98,60 @@ def main():
         if str(locker).isdigit():
             outstanding.pop(int(locker), None)
 
+    def handle_line(line):
+        """React to one line from the Mega. Anything not listed is just logged."""
+        print(f"[mega] {line}")
+        if line.startswith("DONE,"):
+            # DONE,<locker>,<uid>,<slot>  — the Mega always sends 4 fields.
+            # Splitting with maxsplit=2 would glue ",<slot>" onto the uid, and
+            # Tool::normTag keeps digits, so the tag would never match.
+            parts  = line.split(",", 3)
+            locker = parts[1] if len(parts) > 1 else ""
+            uid    = parts[2] if len(parts) > 2 else ""
+            slot   = parts[3] if len(parts) > 3 else "0"
+            cid = pending(locker)
+            if not cid:
+                return
+            payload = {"command_id": cid, "uid": uid}
+            if slot.isdigit() and int(slot) > 0:
+                payload["slot"] = int(slot)
+            ok, data = api(cfg, "POST", "confirm", payload)
+            if ok:
+                resolve(locker)
+                r = data.get("result", {})
+                print(f"  -> {data.get('action','?').upper()} saved: {data.get('tool')} (tx #{r.get('txId')})")
+            elif ok is False:
+                # The server REJECTED the scan (wrong locker's tool, unknown tag,
+                # not available). That is final: the door has already re-locked
+                # and the server has marked the command failed with the reason,
+                # so the kiosk can show it. Nothing to retry.
+                resolve(locker)
+                print(f"  -> confirm REJECTED: {data}")
+            else:
+                # Network error: keep the command so the stale watchdog can
+                # close it out, rather than losing the id outright.
+                print(f"  -> confirm unreachable: {data}")
+
+        elif line.startswith("TIMEOUT,"):
+            locker = line.split(",", 1)[1]
+            cid = pending(locker)
+            if cid:
+                # `reason` lets the server tell the kiosk what happened.
+                api(cfg, "POST", "confirm", {"command_id": cid, "timeout": True, "reason": "timeout"})
+                resolve(locker)
+                print(f"  -> locker {locker} timed out; cancelled.")
+
+        elif line.startswith("NOWIRE,"):
+            # That cabinet lives on the other controller (or isn't built yet).
+            # Cancel it: otherwise the command stays 'sent' forever and the
+            # kiosk waits on a door that is never going to open.
+            locker = line.split(",", 1)[1]
+            cid = pending(locker)
+            if cid:
+                api(cfg, "POST", "confirm", {"command_id": cid, "timeout": True, "reason": "nowire"})
+                resolve(locker)
+            print(f"  -> locker {locker} is NOT on this controller; cancelled.")
+
     while True:
         try:
             ser = serial.Serial(cfg["port"], cfg["baud"], timeout=0.2)
@@ -131,57 +185,30 @@ def main():
                     except OSError as e:
                         print(f"  inject failed: {e}")
 
-                # --- read anything the Mega said -----------------------------
-                line = ser.readline().decode("utf-8", errors="replace").strip()
-                if line:
-                    print(f"[mega] {line}")
-                    if line.startswith("DONE,"):
-                        # DONE,<locker>,<uid>,<slot>  — the Mega always sends 4 fields.
-                        # Splitting with maxsplit=2 would glue ",<slot>" onto the uid, and
-                        # Tool::normTag keeps digits, so the tag would never match.
-                        parts  = line.split(",", 3)
-                        locker = parts[1] if len(parts) > 1 else ""
-                        uid    = parts[2] if len(parts) > 2 else ""
-                        slot   = parts[3] if len(parts) > 3 else "0"
-                        cid = pending(locker)
-                        if cid:
-                            payload = {"command_id": cid, "uid": uid}
-                            if slot.isdigit() and int(slot) > 0:
-                                payload["slot"] = int(slot)
-                            ok, data = api(cfg, "POST", "confirm", payload)
-                            if ok:
-                                # Resolve only once the server has it; dropping it before
-                                # a failed confirm would lose the command id for good and
-                                # the transaction would never be recorded.
-                                resolve(locker)
-                                r = data.get("result", {})
-                                print(f"  -> {data.get('action','?').upper()} saved: {data.get('tool')} (tx #{r.get('txId')})")
-                            else:
-                                print(f"  -> confirm failed: {data}")
-                    elif line.startswith("TIMEOUT,"):
-                        locker = line.split(",", 1)[1]
-                        cid = pending(locker)
-                        if cid:
-                            api(cfg, "POST", "confirm", {"command_id": cid, "timeout": True})
-                            resolve(locker)
-                            print(f"  -> locker {locker} timed out; cancelled.")
-                    elif line.startswith("NOWIRE,"):
-                        # That cabinet lives on the other controller (or isn't built yet).
-                        # Cancel it: otherwise the command stays 'sent' forever and the
-                        # kiosk waits on a door that is never going to open.
-                        locker = line.split(",", 1)[1]
-                        cid = pending(locker)
-                        if cid:
-                            api(cfg, "POST", "confirm", {"command_id": cid, "timeout": True})
-                            resolve(locker)
-                        print(f"  -> locker {locker} is NOT on this controller; cancelled.")
+                # --- read EVERYTHING the Mega said ----------------------------
+                # Drain the whole receive buffer each pass, not one line. Reading a
+                # single line per iteration, with an HTTP poll in between, only ever
+                # kept up because the Mega used to say almost nothing. With the
+                # sensor sample stream it emits ~16 lines/s; one-per-pass drained
+                # ~1/s, the OS buffer overflowed, and DONE/TIMEOUT arrived 60 lines
+                # late — after the stale watchdog had already cancelled the command.
+                # The cap keeps a runaway stream from starving the command poll.
+                drained = 0
+                while drained < 200:
+                    if drained and ser.in_waiting == 0:
+                        break
+                    line = ser.readline().decode("utf-8", errors="replace").strip()
+                    if not line:
+                        break
+                    drained += 1
+                    handle_line(line)
 
                 # --- give up on commands the Mega never answered -------------
                 now = time.time()
                 for lk in [k for k, (_, due) in list(outstanding.items()) if now > due]:
                     cid = pending(lk)
                     if cid:
-                        api(cfg, "POST", "confirm", {"command_id": cid, "timeout": True})
+                        api(cfg, "POST", "confirm", {"command_id": cid, "timeout": True, "reason": "stale"})
                         print(f"  -> locker {lk} never answered ({STALE_AFTER}s); cancelled.")
                     resolve(lk)
 
