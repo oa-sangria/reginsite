@@ -1,9 +1,9 @@
 /* ============================================================================
    reginsite — Locker Terminal (touchscreen kiosk)  ·  SCREEN-DRIVEN
    ---------------------------------------------------------------------------
-   Runs full-screen on the mini PC's 7" 800x480 touchscreen. The USB QR scanner
-   (SM8070) is a keyboard-wedge: it "types" the student ID text, which we
-   capture below. Talks to /api/esp32/* — the same API the Arduino bridge uses.
+   Runs full-screen on the mini PC's 7" 1024x600 touchscreen. The USB QR scanner
+   (SM8070) is a keyboard-wedge desk unit: it "types" the student ID text, which
+   we capture below. Talks to /api/esp32/* — the same API the Arduino bridge uses.
 
    Screens: idle → terms → home → pick → await (locker open) → receipt.
    Presentation lives in assets/css/terminal.css ("Workshop Light").
@@ -463,8 +463,7 @@
           (tag ? "tag " + esc(tag) : "tool RFID UID, e.g. E9:8C:7B:06") + '" ' +
           'value="' + esc(tag || "") + '" autocomplete="off" spellcheck="false" />' +
         '<button class="k-btn k-btn--ghost k-btn--sm" id="simBtn">Confirm tag</button>' +
-      "</div>" +
-      '<p class="k-err" id="simErr" hidden></p>';
+      "</div>";
 
     stage(
       '<div class="k-split k-split--door">' +
@@ -481,11 +480,11 @@
           '<ol class="k-rail">' +
             '<li class="is-done" data-n="01"><b>Door released</b>' +
               "<small>" + esc(cmd.message || "Locker unlocked") + "</small></li>" +
-            '<li class="is-active" data-n="02"><b>' +
+            '<li class="is-active" data-n="02" id="railLift"><b>' +
               (borrowing ? "Lift the tool out" : "Seat the tool in its slot") + "</b>" +
               "<small>" + (borrowing ? "The slot sensor confirms it left" : "The slot sensor confirms it is back") +
               "</small></li>" +
-            '<li data-n="03"><b>Tap its RFID tag on the reader</b>' +
+            '<li data-n="03" id="railTag"><b>Tap its RFID tag on the reader</b>' +
               "<small>Records the exact tool — then the door locks</small></li>" +
           "</ol>" +
           bench +
@@ -502,16 +501,11 @@
     });
     on("simBtn", function () {
       var uid = el("uidInput").value.trim(); if (!uid) return;
-      var errBox = el("simErr");
-      errBox.hidden = true;
-      // Keep polling: a rejected tag is not a dead end, the locker is still open.
-      call("confirm", { command_id: cmd.commandId, uid: uid }).then(function (j) {
-        screenReceipt(mode, j, cmd);
-      })["catch"](function (e) {
-        if (!el("simErr")) return;
-        el("simErr").innerHTML = ico("i-alert") + "<span>" + esc(e.message) + "</span>";
-        el("simErr").hidden = false;
-      });
+      // Bench stand-in for the bridge's confirm. Either way the command goes
+      // terminal server-side (done, or failed with a note), and the poll below
+      // renders the outcome exactly as it would for a real scan — so a rejected
+      // tag shows the same stop plate the student would see in the field.
+      call("confirm", { command_id: cmd.commandId, uid: uid })["catch"](function () {});
     });
 
     // Real hardware path: the bridge confirms server-side. Poll the COMMAND, not
@@ -522,11 +516,49 @@
     // 600ms: the outcome is already recorded server-side by the time we poll,
     // so this interval IS the delay the student sees. command-status is one
     // indexed lookup on localhost.
+    // Mid-window progress. While the command is open, `note` carries the
+    // stages the Mega has reported so far ("moved", "scanned"). The rail is
+    // the student's only window into a reader that can take a moment: the
+    // spinner on step 03 says "keep the tag there", and the tick says "got it".
+    var shown = "";
+    function renderRail(moved, scanned) {
+      var key = (moved ? "m" : "") + (scanned ? "s" : "");
+      if (key === shown) return;
+      shown = key;
+      var lift = el("railLift"), tag = el("railTag");
+      if (!lift || !tag) return;
+
+      lift.className = moved ? "is-done" : (scanned ? "is-busy" : "is-active");
+      lift.querySelector("small").textContent = moved
+        ? (borrowing ? "The slot sensor saw it leave" : "The slot sensor saw it go back")
+        : (scanned
+            ? (borrowing ? "Tag read — now lift the tool out of its slot" : "Tag read — now seat the tool in its slot")
+            : (borrowing ? "The slot sensor confirms it left" : "The slot sensor confirms it is back"));
+
+      tag.className = scanned ? "is-done" : (moved ? "is-busy" : "");
+      tag.querySelector("b").textContent = scanned ? "Tag read" : "Tap its RFID tag on the reader";
+      tag.querySelector("small").textContent = scanned
+        ? (moved ? "Saving…" : "Recorded — waiting on the slot sensor")
+        : (moved ? "Hold the tag flat on the reader and keep it there until it beeps"
+                 : "Records the exact tool — then the door locks");
+
+      hint(scanned && moved ? "Saving the transaction"
+         : scanned ? (borrowing ? "Tag read — lift the tool out" : "Tag read — seat the tool")
+         : moved   ? "Hold the tag on the reader until it beeps"
+                   : (borrowing ? "Waiting for the tool to be removed" : "Waiting for the tool to be replaced"));
+    }
+
     var settling = false;
     pollTimer = setInterval(function () {
       if (settling) return;
       call("command-status", { command_id: cmd.commandId }).then(function (c) {
         if (!c.ok || settling) return;
+
+        if (c.status === "pending" || c.status === "sent") {
+          var stages = "," + (c.note || "") + ",";
+          renderRail(stages.indexOf(",moved,") >= 0, stages.indexOf(",scanned,") >= 0);
+          return;                                  // keep waiting
+        }
 
         if (c.status === "done") {
           settling = true;

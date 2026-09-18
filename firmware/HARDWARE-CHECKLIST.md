@@ -98,7 +98,11 @@ Mega 2 (*not built yet*): cabinets 6–8 use 22/23…44/45 as above; cabinet 9 =
 
 - ☐ Sensors are on the regulated 5 V rail, **not** the Mega's onboard regulator
       (~15 mA each; 20 sensors ≈ 300 mA peak)
-- ☐ `SENSORS_ENABLED` flipped to `true` in `locker_controller.ino` once wiring is verified
+- ☐ `emptyCm` in the `CABS` tables matches a fresh `USS` reading for every slot (cabinets empty)
+- ☐ RC522: `SELFTEST` shows `v=0x92`/`0x91` + `antenna ON` **before and after** ten solenoid cycles
+- ☐ RC522: 10–100 µF across VCC/GND at the module; SPI leads as short as the mounting allows
+- ☐ RC522 antenna is not beside an energised solenoid or the relay-board wiring
+- ☐ `#define BENCH_MODE 0` before the cabinet goes live (boot banner says `bench=0`)
 
 ---
 

@@ -205,6 +205,11 @@ class Esp32Controller extends Controller
             throw new HttpException($code, $msg);
         };
 
+        if (!$student) {
+            // Deleted between the request and the scan; LockerSystem would 500 on null.
+            $fail(404, 'The student on this command no longer exists');
+        }
+
         if ($cmd->mode === 'borrow') {
             if (!$tool) {
                 $fail(422, 'That tag is not registered to any tool');
@@ -227,6 +232,32 @@ class Esp32Controller extends Controller
         $result = $this->system->returnTool($student, $tool->id);
         $cmd->update(['status' => 'done', 'tool_id' => $tool->id]);
         return response()->json(['ok' => true, 'action' => 'return', 'tool' => $tool->name, 'result' => $result, 'status' => 'done']);
+    }
+
+    // 4a) Bridge relays mid-window events ("scanned": the Mega read a tag,
+    //     "moved": the slot sensor saw the tool go) so the kiosk can show the
+    //     student that their tap registered. While the command is open, `note`
+    //     holds the comma-joined stages seen so far; the terminal transition in
+    //     confirm() replaces it with the human-readable outcome. ------------ //
+    public function commandProgress(Request $request)
+    {
+        $cmd = DeviceCommand::find((int) $request->input('command_id', 0));
+        if (!$cmd) {
+            throw new HttpException(404, 'Unknown command');
+        }
+        $stage = (string) $request->input('stage', '');
+        if (!in_array($stage, ['scanned', 'moved'], true)) {
+            throw new HttpException(422, 'Unknown stage');
+        }
+        if ($cmd->isTerminal()) {
+            return response()->json(['ok' => true, 'status' => $cmd->status, 'note' => $cmd->note]);
+        }
+        $stages = array_filter(explode(',', (string) $cmd->note));
+        if (!in_array($stage, $stages, true)) {
+            $stages[] = $stage;
+            $cmd->update(['note' => implode(',', $stages)]);
+        }
+        return response()->json(['ok' => true, 'status' => $cmd->status, 'note' => $cmd->note]);
     }
 
     // 4b) Kiosk polls this while a door is open, so it can react to a timeout or
@@ -305,9 +336,6 @@ class Esp32Controller extends Controller
             try {
                 $s = Student::where('student_no', $ev['student_no'] ?? '')
                     ->orWhere('qr_code', $ev['qr'] ?? '')->first();
-                if (!$s && !empty($ev['uid'])) {
-                    // borrow/return by tag when no student key present
-                }
                 if (!$s) {
                     throw new HttpException(404, 'Unknown student in event');
                 }

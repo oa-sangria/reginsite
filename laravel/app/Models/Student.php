@@ -24,9 +24,11 @@ class Student extends Model
         return $this->transactions()->whereNull('return_time');
     }
 
-    /* Eligibility: allowed program/major, not banned, holding nothing.
-       Term 2 of the posted T&C is "OVERDUE **or unreturned**" — one tool at a
-       time — so any open borrow blocks, not just an overdue one. */
+    /* Eligibility: allowed program/major, not banned, no OVERDUE item, and fewer
+       than max_open_borrows (default 3) tools out. Holding a tool that is still
+       within its 8-hour window does NOT block — only an overdue one does.
+       (Aug 22 briefly enforced "one tool at a time"; that was the wrong reading
+       of the rule and was reverted Sep 18.) */
     public function eligibility(): array
     {
         // Program gate only applies once a program is on file (scanned IDs);
@@ -45,14 +47,16 @@ class Student extends Model
         $open = $this->openBorrows()->with('tool')->get();
         $overdue = $open->where('status', 'overdue');
         if ($overdue->count() > 0) {
+            $names = $overdue->map(fn ($t) => optional($t->tool)->name)->filter()->implode(', ');
             return ['can_borrow' => false,
-                'reason' => 'Has ' . $overdue->count() . ' overdue item(s) — must return first'];
-        }
-        if ($open->count() > 0) {
-            $names = $open->map(fn ($t) => optional($t->tool)->name)->filter()->implode(', ');
-            return ['can_borrow' => false,
-                'reason' => 'Already holding ' . ($names !== '' ? $names : $open->count() . ' tool(s)')
+                'reason' => 'Overdue: ' . ($names !== '' ? $names : $overdue->count() . ' item(s)')
                     . ' — return it before borrowing again'];
+        }
+        $max = max(1, (int) Setting::get('max_open_borrows', '3'));
+        if ($open->count() >= $max) {
+            return ['can_borrow' => false,
+                'reason' => 'Already holding ' . $open->count() . ' tools (the maximum is ' . $max
+                    . ') — return one before borrowing again'];
         }
         return ['can_borrow' => true, 'reason' => 'Clear'];
     }

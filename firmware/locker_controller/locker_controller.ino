@@ -23,7 +23,10 @@
    Mega-> PC   : #<banner>                (informational, bridge ignores)
                  READY,<controller_id>
                  OPENED,<cabinet>
-                 SCAN,<uid>
+                 MOVED,<cabinet>,<slot>   (slot sensor saw the tool go/return;
+                                           sent at once with slot 0 when the
+                                           cabinet is running tag-only)
+                 SCAN,<uid>               (tag read; inside a window it beeps)
                  DONE,<cabinet>,<uid>,<slot>   (slot 1..N, 0 = unknown)
                  TIMEOUT,<cabinet>
                  NOWIRE,<cabinet>         (that cabinet is on the OTHER board)
@@ -74,28 +77,39 @@
    the old D22/D23 relay harness, which is gone. */
 const bool SENSORS_ENABLED = true;
 
-/* BRING-UP DIAGNOSTIC — set false for production.
-   Allows "SIMTAG,<uid>" over serial to stand in for a physical tag scan, so the
+/* BENCH_MODE — the ONE switch for bring-up behaviour. Set to 0 for the field.
+   It is the default for the three flags below, which used to be flipped one by
+   one and could be left half-done. announce() prints bench=<0|1> so the bridge
+   log always shows which build is on the board. */
+#define BENCH_MODE 1
+
+/* Allows "SIMTAG,<uid>" over serial to stand in for a physical tag scan, so the
    whole chain (bridge -> OPEN -> DONE -> Laravel) can be exercised without a
    tool in hand. It bypasses the reader, so anyone with serial access could
    trigger a borrow — which is why it must be off in the field. */
-const bool ALLOW_SIMTAG = true;
+const bool ALLOW_SIMTAG = BENCH_MODE;
 
-/* Idle tag reporting, toggleable at runtime with "IDLESCAN,0|1".
-   It MUST be off while running RF diagnostics: the idle poll and a diagnostic
-   REQA are two independent anticollision sequences aimed at the same tag, and
-   they collide into a malformed ATQA that looks exactly like a hardware fault.
-   Any measurement taken with this on is measuring the firmware, not the reader. */
-bool idleScanEnabled = true;
+/* Idle tag reporting (tap a tag any time to see its UID + a short beep),
+   toggleable at runtime with "IDLESCAN,0|1".
+   Off in the field on purpose: a student walking up with a tool to return hears
+   that beep BEFORE tapping Return on the screen and assumes it already scanned.
+   It MUST also be off while running RF diagnostics: the idle poll and a
+   diagnostic REQA are two independent anticollision sequences aimed at the same
+   tag, and they collide into a malformed ATQA that looks exactly like a hardware
+   fault. Any measurement taken with this on is measuring the firmware. */
+bool idleScanEnabled = BENCH_MODE;
 
-/* SLOTDBG,1 — stream every slot sample during an OPEN window as
+/* SLOTDBG,0|1 — stream every slot sample during an OPEN window as
    "#slot,<cab>,<slot>,<cm>,<raw>,<filled>" so threshold problems are visible
-   instead of inferred. Off by default; it is chatty. */
-bool slotDebug = true;     // on during bring-up; set false once slots are trusted
+   instead of inferred. Chatty (~16 lines/s), which is why the bridge drains its
+   serial buffer in bulk; set false once slots are trusted. */
+bool slotDebug = BENCH_MODE;
 
 const uint8_t MAX_SLOTS = 4;
 
-struct Slot    { uint8_t trig, echo; };
+/* emptyCm: what this slot's sensor reads with NO tool in it (the shelf behind).
+   0 = not measured yet -> the global PRESENT_CM/ABSENT_CM fallback applies. */
+struct Slot    { uint8_t trig, echo; float emptyCm; };
 struct Cabinet { uint8_t number, relayPin, slots; Slot slot[MAX_SLOTS]; };
 
 /* Debounced per-slot occupancy. Declared up here with the other structs because
@@ -110,12 +124,12 @@ struct SlotState { bool filled, cand; uint8_t agree, miss; };
 #if CONTROLLER_ID == 1
 const uint8_t NUM_CABS = 5;
 const Cabinet CABS[NUM_CABS] = {
-  //  cab  relay  slots  {TRIG,ECHO} per slot
-  {    1,  A12,   4, { {22,23}, {24,25}, {26,27}, {28,29}   } },  // USS 1-4   Pliers
-  {    2,  A13,   4, { {30,31}, {32,33}, {34,35}, {36,37}   } },  // USS 5-8   Side Cutter
-  {    3,    6,   4, { {38,39}, {40,41}, {42,43}, {44,45}   } },  // USS 9-12  Wire Crimper
-  {    4,    7,   4, { {46,47}, {48,49}, {A0,A1}, {A2,A3}   } },  // USS 13-16 Clamp Meter
-  {    5,    8,   4, { {A4,A5}, {A6,A7}, {A8,A9}, {A10,A11} } },  // USS 17-20 Multimeter
+  //  cab  relay  slots  {TRIG,ECHO,emptyCm} per slot A..D — emptyCm measured 2026-09-18, "not yet very accurate"
+  {    1,  A12,   4, { {22,23,12.0}, {24,25,12.0}, {26,27,10.5}, {28,29,10.5}   } },  // USS 1-4   Pliers
+  {    2,  A13,   4, { {30,31,14.0}, {32,33,14.0}, {34,35,10.5}, {36,37,10.5}   } },  // USS 5-8   Side Cutter
+  {    3,    6,   4, { {38,39,13.5}, {40,41,13.5}, {42,43,11.5}, {44,45,11.5}   } },  // USS 9-12  Wire Crimper
+  {    4,    7,   4, { {46,47,11.0}, {48,49,11.0}, {A0,A1,7.5},  {A2,A3,7.0}    } },  // USS 13-16 Clamp Meter
+  {    5,    8,   4, { {A4,A5,11.0}, {A6,A7,11.5}, {A8,A9,9.0},  {A10,A11,9.0}  } },  // USS 17-20 Multimeter
 };
 #else
 const uint8_t NUM_CABS = 5;
@@ -125,28 +139,41 @@ const uint8_t NUM_CABS = 5;
    SCK/MOSI as outputs and fire cabinets 7 and 8. A0-A15 are otherwise unused
    on this board, so the SPI bus stays free. */
 const Cabinet CABS[NUM_CABS] = {
-  {    6,   A0,   4, { {22,23}, {24,25}, {26,27}, {28,29} } },    // USS 21-24
-  {    7,   A1,   4, { {30,31}, {32,33}, {34,35}, {36,37} } },    // USS 25-28
-  {    8,   A2,   4, { {38,39}, {40,41}, {42,43}, {44,45} } },    // USS 29-32
-  {    9,   A3,   1, { {46,47} } },                               // USS 33  Makita Drill A
-  {   10,   A4,   1, { {48,49} } },                               // USS 34  Makita Drill B
+  {    6,   A0,   4, { {22,23,8.5},  {24,25,8.5},  {26,27,6.5},  {28,29,6.5}  } },  // USS 21-24 Screwdriver Set
+  {    7,   A1,   4, { {30,31,12.0}, {32,33,12.0}, {34,35,10.0}, {36,37,10.0} } },  // USS 25-28 Wire Stripper
+  {    8,   A2,   4, { {38,39,12.5}, {40,41,12.5}, {42,43,10.0}, {44,45,10.0} } },  // USS 29-32 Soldering Iron
+  {    9,   A3,   1, { {46,47,7.0} } },                                             // USS 33  Makita Drill A
+  {   10,   A4,   1, { {48,49,7.0} } },                                             // USS 34  Makita Drill B
 };
 #endif
 
 const bool  ACTIVE_LOW = true;                 // relay board polarity
-/* Calibrated on Locker 2 slot 1 (2026-09-15) with the tool actually in the
-   beam: tool IN 4.0cm (3.9-4.4), tool OUT 9.3cm (the shelf behind it). A tool
-   too small to reach the beam reads identically in and out — the sensor must
-   see the tool's BODY, not the shelf beside it. Thresholds sit in the gap;
-   readings between them hold prior state. These are global for now; slots
-   whose empty-shelf distance differs will need their own pair. */
-const float PRESENT_CM = 5.9;                  // <= this = tool in the slot
-const float ABSENT_CM  = 7.4;                  // >= this = slot empty
+/* Per-slot thresholds, derived from each slot's measured empty-shelf distance
+   (Slot.emptyCm in the tables above):
+     ABSENT  when  d >= emptyCm - ABSENT_MARGIN_CM    (reading is "the shelf")
+     PRESENT when  d <= emptyCm - PRESENT_MARGIN_CM   (something is well in front of it)
+   Between the two the slot holds its previous state (hysteresis). The margins
+   are the two numbers to tune once the distances are trusted: raise
+   PRESENT_MARGIN if empty slots flicker "in"; lower it if a tool sitting close
+   to the shelf never registers. The shelf reads 6.5-14cm across the cabinets
+   and a tool body ~4cm (Locker 2 slot 1, 2026-09-15: IN 4.0, 3.9-4.4), so a
+   fixed pair could not fit every slot — the shallow ones would never read
+   empty. A tool too small to reach the beam reads identically in and out;
+   the sensor must see the tool's BODY, not the shelf beside it.
+   Slots with emptyCm = 0 (not measured) fall back to the global pair. */
+const float ABSENT_MARGIN_CM  = 1.0;
+const float PRESENT_MARGIN_CM = 2.0;
+const float PRESENT_CM = 5.9;                  // fallback: <= this = tool in the slot
+const float ABSENT_CM  = 7.4;                  // fallback: >= this = slot empty
 const uint8_t       AGREE_N          = 2;      // samples that must agree to flip a slot
 const uint8_t       MISS_LIMIT       = 3;      // consecutive no-echoes before flagging
 const unsigned long ECHO_TIMEOUT_US  = 12000;  // ~2 m; a dead sensor costs 12ms not 30
 const uint8_t       SENSOR_SETTLE_MS = 60;     // HC-SR04 datasheet measurement cycle
-const unsigned long OPEN_TIMEOUT_MS  = 20000;
+/* How long a door stays unlocked waiting for lift + tag. 20s was tight for a
+   first-timer hunting for the tag; 45s. The bridge's STALE_AFTER must stay
+   above this (OPEN_WINDOW_S in bridge.py) — change both together. The kiosk's
+   Cancel relocks early via ABORT, so the length only matters when nobody acts. */
+const unsigned long OPEN_TIMEOUT_MS  = 45000;
 
 /* ---- Cabinet lookup ------------------------------------------------------- */
 int8_t cabIndex(uint8_t cabNumber) {
@@ -230,10 +257,14 @@ void sampleSlot(const Cabinet &c, uint8_t s, SlotState *st) {
   }
   st[s].miss = 0;
 
+  float empty     = c.slot[s].emptyCm;
+  float presentAt = empty > 0 ? empty - PRESENT_MARGIN_CM : PRESENT_CM;
+  float absentAt  = empty > 0 ? empty - ABSENT_MARGIN_CM  : ABSENT_CM;
+
   bool raw; char rawc;
-  if      (d <= PRESENT_CM) { raw = true;  rawc = 'P'; }
-  else if (d >= ABSENT_CM)  { raw = false; rawc = 'A'; }
-  else                      { rawc = '-'; }
+  if      (d <= presentAt) { raw = true;  rawc = 'P'; }
+  else if (d >= absentAt)  { raw = false; rawc = 'A'; }
+  else                     { rawc = '-'; }
 
   if (rawc != '-') {
     if (raw == st[s].cand) {
@@ -266,22 +297,46 @@ void baselineSweep(const Cabinet &c, SlotState *st) {
 #if HAS_RFID
 inline char hexDigit(uint8_t v) { return v < 10 ? ('0' + v) : ('A' + v - 10); }
 
-/* No String anywhere: at a ~5ms poll cadence a String-based reader would churn
+/* Clone RC522s go deaf: after EMI from a solenoid switching, or hours idle, the
+   chip stops answering (VersionReg reads 0x00/0xFF) or silently drops the
+   antenna drive — and nothing short of a soft reset brings it back. PCD_Init()
+   IS that soft reset (~50-100ms), so run it at the top of every OPEN window,
+   where a dead reader costs a 20s timeout, and from a periodic health check
+   while idle. Prints the version byte so the bridge log shows whether the
+   chip was alive at the moment that matters. Resets antenna gain to the
+   library default (what setup() uses); see the GAIN command. */
+void rfidReinit(const __FlashStringHelper *why) {
+  rfid.PCD_Init();
+  rfid.PCD_AntennaOn();
+  uint8_t v = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  Serial.print(F("#rc522 reinit (")); Serial.print(why); Serial.print(F(") v=0x"));
+  if (v < 0x10) Serial.print('0');
+  Serial.println(v, HEX);
+}
+
+/* True when the chip is answering AND both antenna drivers are on. Two register
+   reads; cheap enough to call every few seconds. */
+bool rfidHealthy() {
+  uint8_t v  = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  uint8_t tx = rfid.PCD_ReadRegister(MFRC522::TxControlReg);
+  return (v != 0x00 && v != 0xFF) && ((tx & 0x03) == 0x03);
+}
+
+/* No String anywhere: polled every loop pass, a String-based reader would churn
    thousands of heap allocations per open window on an 8KB heap. Returns false
-   without allocating in the overwhelmingly common no-card case. */
-/* PICC_IsNewCardPresent() sends REQA, which only answers cards in IDLE state.
-   Every successful read ends with PICC_HaltA(), so a tag left sitting on the
-   reader is HALTed and REQA can no longer see it — it would have to be lifted
-   and re-tapped. WUPA wakes halted cards too, so try REQA first and fall back
-   to WUPA. Without this, a tag already read while idle is invisible for the
-   whole OPEN window. */
+   without allocating in the overwhelmingly common no-card case.
+
+   WUPA, not REQA. REQA only answers cards in IDLE state, and every successful
+   read ends with PICC_HaltA(), so a tag left sitting on the reader (or read by
+   the idle scan a moment ago) is HALTed and invisible to REQA — it would have
+   to be lifted and re-tapped. WUPA answers IDLE *and* HALT (ISO 14443-3), so it
+   is a strict superset; the old REQA-then-WUPA pair just paid the library's
+   25ms no-answer timeout twice per poll. One timeout (~25ms) is the cost of a
+   no-card pass now, which is what sets the loop cadence in handleOpen(). */
 bool cardPresent() {
   byte atqa[2];
   byte size = sizeof(atqa);
-  MFRC522::StatusCode s = rfid.PICC_RequestA(atqa, &size);
-  if (s == MFRC522::STATUS_OK || s == MFRC522::STATUS_COLLISION) return true;
-  size = sizeof(atqa);
-  s = rfid.PICC_WakeupA(atqa, &size);
+  MFRC522::StatusCode s = rfid.PICC_WakeupA(atqa, &size);
   return (s == MFRC522::STATUS_OK || s == MFRC522::STATUS_COLLISION);
 }
 
@@ -328,7 +383,8 @@ void announce() {
   Serial.print(F(" cabinets="));
   Serial.print(CABS[0].number); Serial.print('-'); Serial.print(CABS[NUM_CABS - 1].number);
   Serial.print(F(" rfid=")); Serial.print(HAS_RFID ? 1 : 0);
-  Serial.print(F(" sensors=")); Serial.println(SENSORS_ENABLED ? 1 : 0);
+  Serial.print(F(" sensors=")); Serial.print(SENSORS_ENABLED ? 1 : 0);
+  Serial.print(F(" bench=")); Serial.println(BENCH_MODE);
   Serial.print(F("READY,")); Serial.println(CONTROLLER_ID);
 }
 
@@ -359,10 +415,11 @@ void selfTest() {
   Serial.print(F("#rc522 rx gain=")); Serial.print(gain);
   Serial.println(gain >= 7 ? F(" (max)") : F(" (not max - raise for range)"));
 
-  /* Probe with the SAME path the real read uses. A REQA-only probe is useless
-     here: every successful read ends in PICC_HaltA(), and a HALTed card ignores
-     REQA forever — the probe would report "Timeout" against a perfectly good tag
-     sitting on the coil. cardPresent() falls back to WUPA, which wakes it. */
+  /* Probe REQA and WUPA separately — diagnostics only; the real read path is
+     WUPA alone (see cardPresent). Every successful read ends in PICC_HaltA(),
+     and a HALTed card ignores REQA forever, so "REQA Timeout, WUPA OK" against
+     a tag sitting on the coil is NORMAL, not a fault. Both timing out with a
+     tag present is the fault. */
   byte atqa[2]; byte n = sizeof(atqa);
   MFRC522::StatusCode st = rfid.PICC_RequestA(atqa, &n);
   Serial.print(F("#rc522 REQA -> "));
@@ -407,7 +464,8 @@ void ussScan() {
       Serial.print(',');       Serial.print(sl.trig);
       Serial.print('/');       Serial.print(sl.echo);
       Serial.print(',');
-      if (d < 0) Serial.println(F("none")); else Serial.println(d, 1);
+      if (d < 0) Serial.print(F("none")); else Serial.print(d, 1);
+      Serial.print(F(",empty=")); Serial.println(sl.emptyCm, 1);   // what the table expects
 
       /* While sensors are not yet enabled, put the pins back exactly as
          relaysSafeInit() left them: D22/D23 parked at the relay idle level in
@@ -437,6 +495,13 @@ void handleOpen(uint8_t cabNum, const char *mode) {
   bool wantFill    = (strcmp(mode, "return") == 0);
   bool haveSensors = SENSORS_ENABLED && c.slots > 0 && c.slot[0].trig != 0;
 
+#if HAS_RFID
+  /* Fresh reader for the one window where it has to work. ~50-100ms, before the
+     door moves, so the student never notices; the printed version byte tells
+     the bridge log the chip was alive when the window opened. */
+  rfidReinit(F("open"));
+#endif
+
   SlotState st[MAX_SLOTS];
   bool baseline[MAX_SLOTS];
   if (haveSensors) {
@@ -462,6 +527,11 @@ void handleOpen(uint8_t cabNum, const char *mode) {
 
   unlockCabinet(ci);
   Serial.print(F("OPENED,")); Serial.println(cabNum);   // report first, beep after
+  if (!haveSensors) {
+    /* Tag-only fallback: the slot condition is already considered met, so tell
+       the kiosk so it moves straight to "tap the tag" (slot 0 = unknown). */
+    Serial.print(F("MOVED,")); Serial.print(cabNum); Serial.println(F(",0"));
+  }
   beep(120);
 
   unsigned long start = millis(), lastPing = 0;
@@ -476,12 +546,21 @@ void handleOpen(uint8_t cabNum, const char *mode) {
 #endif
 
   while (millis() - start < OPEN_TIMEOUT_MS) {
-    /* 1) RFID every tick (~5ms). An RC522 polled slowly misses a tag that is
-          tapped and lifted in under 300ms, which people do constantly. */
+    /* 1) RFID every pass. A no-card pass costs one library timeout (~25ms), so
+          this loop runs at roughly 30ms/pass and the reader is polled ~30x/s —
+          an RC522 polled slowly misses a tag that is tapped and lifted in under
+          300ms, which people do constantly. That same ~30ms is why the sensor
+          check below fires every other pass rather than exactly every 60ms;
+          with 4 slots and AGREE_N=2, a removal registers in roughly 0.5s.
+          (It used to be ~50ms/pass and ~1s, when cardPresent did REQA+WUPA.) */
 #if HAS_RFID
     if (!haveTag && readTagInto(tag, sizeof(tag))) {
       haveTag = true;
       Serial.print(F("SCAN,")); Serial.println(tag);
+      /* The student's only proof the tap registered. Reads can be slow on this
+         reader, so the kiosk tells them to hold the tag until this beep. Short,
+         so a DONE that follows at once is not delayed by much. */
+      beep(40);
     }
 #endif
 
@@ -493,6 +572,8 @@ void handleOpen(uint8_t cabNum, const char *mode) {
       for (uint8_t s = 0; s < c.slots; s++) {
         if (wantFill ? (!baseline[s] && st[s].filled) : (baseline[s] && !st[s].filled)) {
           changedSlot = s;
+          /* Informational, for the kiosk's step rail ("lift the tool" done). */
+          Serial.print(F("MOVED,")); Serial.print(cabNum); Serial.print(','); Serial.println(s + 1);
           break;
         }
       }
@@ -593,7 +674,7 @@ void handleSerial() {
     pinMode(BUZZER_PIN, OUTPUT); digitalWrite(BUZZER_PIN, LOW);
 #endif
 #if HAS_RFID
-    SPI.begin(); rfid.PCD_Init();                       // SPI pins back to the bus
+    SPI.begin(); rfidReinit(F("scanall"));              // SPI pins back to the bus
 #endif
     for (uint8_t i = 0; i < NUM_CABS; i++)
       for (uint8_t s = 0; s < CABS[i].slots; s++) {
@@ -722,21 +803,25 @@ void handleSerial() {
     digitalWrite(sl.trig, LOW);
     return;
   }
-#if HAS_RFID
-  /* GAIN,<0-7> — tune receiver gain live. Too LOW and a tag out of range never
-     answers (REQA Timeout); too HIGH and a tag pressed against the coil can
-     overload the receiver, so the ATQA comes back malformed (REQA Error).
-     The right value is hardware- and mounting-specific, so sweep it in place. */
+  /* SLOTDBG,0|1 — sensor sample stream on/off. Not RFID-related, so it lives
+     outside the HAS_RFID block and works on controller 2 as well. */
   if (strncmp(line, "SLOTDBG,", 8) == 0) {
     slotDebug = (atoi(line + 8) != 0);
     Serial.print(F("#slotdbg=")); Serial.println(slotDebug ? 1 : 0);
     return;
   }
+#if HAS_RFID
   if (strncmp(line, "IDLESCAN,", 9) == 0) {
     idleScanEnabled = (atoi(line + 9) != 0);
     Serial.print(F("#idlescan=")); Serial.println(idleScanEnabled ? 1 : 0);
     return;
   }
+  /* GAIN,<0-7> — tune receiver gain live. Too LOW and a tag out of range never
+     answers (REQA Timeout); too HIGH and a tag pressed against the coil can
+     overload the receiver, so the ATQA comes back malformed (REQA Error).
+     The right value is hardware- and mounting-specific, so sweep it in place.
+     NOTE: rfidReinit() at each OPEN puts the gain back to the library default,
+     so a GAIN value found here has to be hardcoded in setup() to stick. */
   if (strncmp(line, "GAIN,", 5) == 0) {
     uint8_t g = (uint8_t) atoi(line + 5);
     if (g > 7) g = 7;
@@ -757,14 +842,17 @@ void setup() {
 
 #if HAS_RFID
   SPI.begin();
-  rfid.PCD_Init();
+  rfidReinit(F("boot"));
   /* Leave the receiver at the library default gain. Cranking it to RxGain_max
      was tried and made things WORSE: with a tag held against the coil the
      receiver overloads and the reply comes back malformed, which surfaces as
      "Error in communication" on REQA and a failed read. The stock reference
      sketch (firmware/rfid_read_test) reads reliably at the default, so match it.
      Use "GAIN,<0-7>" at runtime to experiment; don't hardcode a raise without
-     measuring full reads, not just REQA. */
+     measuring full reads, not just REQA.
+     One init at boot is NOT enough on its own — see rfidReinit(): the chip is
+     re-initialised at every OPEN and whenever the idle health check finds it
+     deaf, because clone RC522s lock up and stay locked up. */
 #endif
 #if HAS_BUZZER
   pinMode(BUZZER_PIN, OUTPUT);
@@ -792,6 +880,15 @@ void loop() {
   handleSerial();
 
 #if HAS_RFID
+  /* Reader health check. A chip that has gone deaf while idle would otherwise
+     only be noticed by the next student, as a 20s timeout. Two register reads
+     every 10s; reinit only when they say the chip or the antenna is gone. */
+  static unsigned long lastHealth = 0;
+  if (millis() - lastHealth >= 10000) {
+    lastHealth = millis();
+    if (!rfidHealthy()) rfidReinit(F("health"));
+  }
+
   /* Idle tag reporting. Useful on its own (tap a tag any time to see its UID,
      no 20s window to race), and it is the hook the bridge will need once
      Mega 2 exists: that board has no reader, so a slot change reported there

@@ -1,7 +1,7 @@
 # reginsite — Session Handoff / Project Notes
 
 > Living doc so any agent/session can pick up where we left off. **Update this when you change things.**
-> Last updated: 2026-08-17 (session 6: **kiosk UI rebuilt — "Workshop Light"**)
+> Last updated: 2026-09-18 (session 7: **post-917 review — Cancel→ABORT, reader hardening, progress rail, rule change**)
 
 ## ⚠ Hardware facts corrected this session (earlier notes were wrong)
 - **The touchscreen is 1024×600, not 800×480.** 7″ IPS, 5-point capacitive, **HDMI + USB touch,
@@ -14,7 +14,78 @@
   the ID **QR-face-down over the window**; they do not aim it at the monitor. Any terminal copy that
   tells them to "hold your ID up to the screen" or points in a fixed direction is wrong.
 
-## Session 6 — terminal kiosk redesign (current)
+## Session 7 — review of the Aug 22 + Sep 17 commits, done away from the hardware (current)
+
+Neither of the two commits after session 6 was written up, so first what they did:
+- **`518f0e0` (Aug 22)** — bridge got a local queue + single-flight dispatch; kiosk poll 2s → 600ms;
+  `Student::eligibility()` blocked on *any* open loan (**reverted this session — see rule change**).
+- **`e34a304` "917" (Sep 17)** — `device_commands` grew terminal `timeout`/`failed` statuses + a
+  `note`; rejected confirms are terminal; `command-status` endpoint; kiosk polls the *command* and
+  shows "Door locked again"/"wrong tool"; bridge drains the whole serial buffer per pass; firmware
+  `SENSORS_ENABLED=true`, sensor fallback to tag-only, pin-diagnostic serial commands; two-5V-rail
+  power notes. **The USB RFID reader attempt is only the test page
+  `firmware/tests/rfid_usb_capture.html`** (VID FFFF / PID 0035) — nothing else references it.
+  Most likely reason it "didn't work": those readers are almost always **125 kHz EM4100** wedges and
+  the tool tags are **13.56 MHz MIFARE** — it physically cannot see them. The page will show it:
+  types nothing for a tool tag, types for a white 125 kHz fob.
+
+**Rule change (user, 2026-09-18):** borrowing is blocked only by an **overdue** item (return it
+first) or by holding **3 tools** already (`max_open_borrows` setting, seeded 3, shown on the admin
+Terms page). A tool still inside its 8-hour window does not block. `Student::eligibility()` +
+seeded T&C term 2 updated. *On the mini PC the T&C text lives in the DB — reseed or edit it on the
+Terms page for the new wording to show.*
+
+**Fixed / added this session (all verified except the firmware, which cannot compile here):**
+- **Cancel now relocks the door.** Nothing ever sent the Mega `ABORT`. `bridge.py` polls
+  `command-status` for its outstanding command once a second and sends `ABORT` when the kiosk has
+  made it terminal. Before: door open for the rest of the window, a tool taken then unrecorded.
+- **Bridge is a daemon now** — one bad pass is logged with its traceback and the loop continues;
+  `api()` treats malformed bodies / half-closed connections as transient; confirms the server could
+  not be reached for are **retried for 10 min** (`unsent` queue; `!! GAVE UP` line carries the
+  payload to enter by hand). Six scenarios pass in a fake-serial harness (cancel→ABORT, normal DONE,
+  late DONE, server down at DONE→retry, crash→continue, progress relay).
+- **`bridge_gui.py` deleted** — a stale copy missing every fix since Aug 22; README pointed at it first.
+- **Progress rail on the await screen.** Mega prints `MOVED,<cab>,<slot>` when the slot sensor
+  flips and **beeps once on `SCAN` inside a window**; bridge relays both as
+  `POST command-progress {stage}`; server accumulates them in `note` while the command is open;
+  kiosk renders step 02 ✓ on moved, step 03 as a **spinner "hold the tag flat on the reader and
+  keep it there until it beeps"** once moved, ✓ "Tag read" on scanned, and "Tag read — now lift the
+  tool out" if the tag came first. Tag-only cabinets send `MOVED` immediately. The bridge only
+  relays `SCAN` after `OPENED` (an idle-scan line already in the buffer must not tick the rail).
+  All four states screenshotted at 1024×600 via the Edge harness.
+- **Open window 20 s → 45 s** (`OPEN_TIMEOUT_MS`; bridge `STALE_AFTER` = 60 s follows it).
+- **Firmware reader hardening** (compile + verify on the mini PC): `cardPresent()` is WUPA-only
+  (REQA was redundant and cost a second 25 ms timeout per poll — loop ~30 ms/pass now, removal
+  noticed in ~0.5 s instead of ~1 s); `rfidReinit()` at every OPEN + 10 s idle health check
+  (`VersionReg` 0x00/0xFF or antenna off → soft reset), `#rc522 reinit (open) v=0x92` in the log.
+  `BENCH_MODE` is the single switch for `ALLOW_SIMTAG`/`idleScanEnabled`/`slotDebug`; `SLOTDBG`
+  moved out of `#if HAS_RFID`.
+- **Per-slot sensor thresholds** from the user's empty-shelf distances (6.5–14 cm; table in
+  `firmware/README.md`), as the third field of each `{TRIG,ECHO,emptyCm}`; thresholds =
+  `emptyCm - ABSENT_MARGIN_CM (1.0)` / `- PRESENT_MARGIN_CM (2.0)`. `USS` prints `empty=` for
+  re-measuring. The old global 5.9/7.4 pair is the fallback for `emptyCm = 0`.
+- Small: `confirm()` 404s instead of 500 if the student was deleted; dead block in `sync()`
+  removed; terminal.js sim path no longer has its own inline error (the poll shows the stop plate,
+  same as hardware); `1024×600` in the terminal.js header; three unrelated nested repos ignored.
+
+**Hardware day checklist** (also in `firmware/README.md` Troubleshooting):
+1. Compile + upload; boot banner shows `bench=1`. `SELFTEST` → `v=0x92`, antenna ON, full read OK.
+2. Bridge log: the gap between `SCAN,` and `DONE,`. SCAN prompt, DONE late/absent = **slot sensor**
+   gate (watch `#slot`), not the reader. SCAN late/absent = reader → power (3.3 V sag; 10–100 µF at
+   the module), SPI lead length (4 MHz, keep < 15–20 cm), antenna vs. solenoid, `#rc522 reinit` line.
+3. `USS` with cabinets empty vs. the table; then a borrow per cabinet watching for `P` on the
+   emptied slot. Tune `PRESENT_MARGIN_CM` / `ABSENT_MARGIN_CM`, not the table.
+4. Kiosk Cancel → door relocks within ~1 s (`<- ABORT` in the log).
+5. Tag first, then lift → rail says "Tag read — now lift the tool out"; lift first → spinner.
+6. USB reader: `firmware/tests/rfid_usb_capture.html` with a tool tag, then any 125 kHz fob.
+
+Still deferred (unchanged): await-screen department showcase; pending-command TTL on the server;
+rotating the exposed `DEVICE_API_KEY`; the `inject.txt` hook and `SIMTAG` stay until bring-up ends.
+
+---
+
+
+## Session 6 — terminal kiosk redesign
 The touchscreen terminal was a dark violet gradient page sharing the admin stylesheet and was never
 laid out for the real panel. **Rebuilt from scratch as its own design system.** Flow, API calls and
 payload contract are byte-for-byte unchanged — this was presentation + kiosk behaviour.
@@ -129,8 +200,8 @@ Launch fullscreen/kiosk with `?kiosk=1` in production (see session 6). Styling l
 `assets/css/terminal.css`, NOT the admin `styles.css`.
 *(Earlier sessions recorded 800×480 — that was wrong, corrected in session 6.)*
 
-**Bridge**: `firmware/bridge/bridge.py` (headless) and `bridge_gui.py` (Tkinter) both poll the
-command queue and confirm results. `pip install pyserial`; config in `config.ini`.
+**Bridge**: `firmware/bridge/bridge.py` (console; the only bridge since session 7) polls the
+command queue and confirms results. `pip install pyserial`; config in `config.ini`.
 
 **Terminal** (`laravel/public/terminal.html` + `assets/js/terminal.js`): captures the QR
 keyboard-wedge, shows program + eligibility, does the screen-driven borrow/return, and has an

@@ -25,6 +25,7 @@ class BootstrapController extends Controller
         return response()->json(['ok' => true, 'data' => [
             'config' => [
                 'borrowLimitHours' => (int) Setting::get('borrow_limit_hours', '8'),
+                'maxOpenBorrows' => (int) Setting::get('max_open_borrows', '3'),
                 'banTriggerDays' => (int) Setting::get('ban_trigger_days', '2'),
                 'banLengthDays' => (int) Setting::get('ban_length_days', '2'),
             ],

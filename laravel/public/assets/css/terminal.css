@@ -459,6 +459,13 @@ html, body { height: 100%; margin: 0; overflow: hidden; }
 .k-rail li.is-active b { color: var(--k-ink); }
 .k-rail li.is-done::before { content: "✓"; background: var(--k-green); border-color: var(--k-green-d); color: #fff; }
 .k-rail li.is-done b { color: var(--k-ink-2); }
+/* Waiting on the hardware for this step: the badge becomes a spinning ring. */
+.k-rail li.is-busy::before {
+  content: ""; border-radius: 50%;
+  background: var(--k-card); border: 2.5px solid var(--k-line-2); border-top-color: var(--k-indigo);
+  animation: kspin .78s linear infinite;
+}
+.k-rail li.is-busy b { color: var(--k-ink); }
 
 /* ---- Receipt ----------------------------------------------------------- */
 .k-ticket {
@@ -581,6 +588,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; }
 .k-actions--end { justify-content: flex-end; }
 
 @media (prefers-reduced-motion: reduce) {
-  .k-screen, .k-cardfloat, .k-ping, .k-door, .k-dot, .k-spin, .k-timer i { animation: none; }
+  .k-screen, .k-cardfloat, .k-ping, .k-door, .k-dot, .k-spin, .k-timer i,
+  .k-rail li.is-busy::before { animation: none; }
   .k-ping { opacity: .35; }
 }

@@ -467,7 +467,8 @@ function renderTerms() {
           "</div></div></div>" +
       '<div class="card"><div class="card-head"><h2>Terminal Preview</h2></div>' +
         '<div class="card-body">' +
-          '<div class="note">⏱ Borrow limit: ' + DB.config.borrowLimitHours + " hours · Ban: overdue ≥ " +
+          '<div class="note">⏱ Borrow limit: ' + DB.config.borrowLimitHours + " hours · Max " +
+            (DB.config.maxOpenBorrows || 3) + " tools out at once · Ban: overdue ≥ " +
             DB.config.banTriggerDays + " days → " + DB.config.banLengthDays + "-day ban</div>" +
           '<pre id="termsPreview" style="white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--border);' +
             'border-radius:10px;padding:16px;margin-top:14px;font-family:inherit;font-size:13px;line-height:1.6"></pre>' +

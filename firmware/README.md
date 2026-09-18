@@ -16,9 +16,10 @@ The Mega has no network/clock — the **mini-PC bridge** relays between the serv
 firmware/
   locker_controller/locker_controller.ino   Arduino Mega firmware (screen-driven)
   rfid_read_test/rfid_read_test.ino         Standalone: prints tag UIDs (for enrolling tools)
-  bridge/bridge.py                           mini-PC bridge (headless)
-  bridge/bridge_gui.py                       mini-PC bridge (GUI: port picker, status, log)
+  bridge/bridge.py                           mini-PC bridge (console; the only bridge)
   bridge/config.ini                          serial_port, base_url, api_key
+  bridge/test_bridge.py                      six-scenario fake-serial test of the bridge (no hardware)
+  tests/rfid_usb_capture.html                what a USB keyboard-wedge RFID reader types
 ```
 
 ## Two controllers
@@ -104,18 +105,94 @@ Verify each buck reads 5.0 V with nothing attached before connecting its load.
 ## The flow (what the firmware does)
 1. Bridge sends `OPEN,<cabinet>,<borrow|return>` (because a student chose a tool on the touchscreen).
 2. Firmware unlocks that cabinet, beeps, prints `OPENED,<cabinet>`.
-3. It waits (20 s) for **both**: the ultrasonic to confirm the tool moved (removed for borrow,
-   present for return) **and** the tool's **RFID tag** scanned on the RC522.
+3. It waits (**45 s**, `OPEN_TIMEOUT_MS`) for **both**: the ultrasonic to confirm the tool moved
+   (removed for borrow, present for return) **and** the tool's **RFID tag** scanned on the RC522.
+   Each half is reported as it happens — `MOVED,<cabinet>,<slot>` and `SCAN,<uid>` (with a short
+   **beep**: the student's proof the tap registered) — and the bridge relays them so the kiosk's
+   step rail ticks along in real time.
 4. On success it relocks, double-beeps, prints `DONE,<cabinet>,<uid>,<slot>`. The bridge then calls
    the server, which records the borrow/return of the exact tool with that UID.
-5. If nothing happens in time it relocks and prints `TIMEOUT,<cabinet>` (server cancels).
+5. If nothing happens in time it relocks and prints `TIMEOUT,<cabinet>` (server cancels). The
+   kiosk's **Cancel** button reaches the Mega as `ABORT` (via the bridge) and relocks at once.
 
-Inside the wait loop the RC522 is polled **every tick (~5 ms)** while ultrasonics fire **one sensor
-per 60 ms**, round-robin. That split is deliberate: sensors need a settle gap between pings to avoid
-crosstalk, but a reader polled that slowly misses a tag tapped and lifted in under 300 ms.
+Inside the wait loop the RC522 is polled **every pass**. A no-card pass costs one library timeout
+(~25 ms — `cardPresent()` sends a single WUPA, which answers both IDLE and HALTed tags), so the loop
+runs at ~30 ms/pass and the ultrasonics fire **one sensor per ~60 ms**, round-robin. That split is
+deliberate: sensors need a settle gap between pings to avoid crosstalk, but a reader polled slowly
+misses a tag tapped and lifted in under 300 ms. With 4 slots and `AGREE_N = 2`, a removal registers
+in roughly 0.5 s.
 
-While `SENSORS_ENABLED = false` (the bring-up default) step 3 needs only the tag, and the reported
-slot is `0`. Flip it to `true` once the ultrasonics are wired.
+`SENSORS_ENABLED` is **true**. A cabinet whose sensors return no echo at open time automatically
+falls back to tag-only (slot reported as `0`, `MOVED` sent immediately), so bring-up cabinets still
+work. The RC522 is **re-initialised at the top of every OPEN** and whenever a 10 s idle health check
+finds it deaf (`#rc522 reinit (...) v=0x92` in the bridge log) — clone readers lock up and stay
+locked up otherwise.
+
+`BENCH_MODE` (top of the sketch) is the one switch for bring-up behaviour: it defaults `ALLOW_SIMTAG`
+(serial `SIMTAG,<uid>` stands in for a tag), `idleScanEnabled` (tap a tag any time; beeps) and
+`slotDebug` (stream every sensor sample). The board announces `bench=1` on boot. **Set it to 0 for
+the field** — the idle beep in particular misleads students returning a tool.
+
+## What you'll see on the mini PC (a good borrow, annotated)
+
+The bridge console is the one place the whole chain is visible. A healthy borrow looks like this:
+
+```
+  queued cmd 41 (locker 1, borrow)            <- kiosk tapped BORROW; server queued it
+  <- OPEN locker 1 (borrow) [cmd 41]           <- bridge told the Mega
+[mega] #rc522 reinit (open) v=0x92             <- reader re-initialised for this window; 0x92 = alive
+[mega] #baseline,1,IN,IN,out,IN                <- what the 4 slots looked like before the door opened
+[mega] OPENED,1                                <- door unlocked; kiosk step 01 ticks
+[mega] #slot,1,3,10.4,A,filled=0               <- sensor samples (slotDebug) — cm, P/A/-, state
+[mega] MOVED,1,2                               <- slot B saw the tool leave; kiosk step 02 ticks, step 03 spins
+[mega] SCAN,E5 77 7B 06                        <- tag read (Mega beeps once); kiosk step 03 ticks
+[mega] DONE,1,E5 77 7B 06,2                    <- both halves met; door relocked, double beep
+  -> BORROW saved: Pliers 1 (tx #12)           <- server wrote the row; kiosk shows the receipt
+```
+
+Things that are *fine* even though they look odd:
+- `[mega] SCAN,...` with no window open — the idle scan (BENCH_MODE). Logged, not acted on.
+- `-> confirm ignored: already timeout` — the student cancelled at the kiosk a moment before the
+  Mega finished; nothing was recorded, which is correct.
+- `<- ABORT locker N: command N is already timeout on the server (Cancelled at the kiosk)` — the
+  Cancel path working: the bridge is relocking the door early.
+- `-> server unreachable (...); confirm cmd 41 ... queued for retry (1 waiting)` followed later by
+  `-> retry delivered after 12s:` — Laravel was restarting; the borrow was still saved.
+
+Things that need attention:
+- `!! unexpected error in bridge loop (continuing):` + a traceback — the bridge survived it, but
+  copy the traceback into an issue.
+- `!! GAVE UP after 600s: confirm cmd ... {"command_id": 41, "uid": "E5 77 7B 06", "slot": 2}` —
+  the server was down for 10 minutes while a tool left the cabinet. Enter that borrow by hand on the
+  admin site.
+- `#rc522 reinit (open) v=0x00` or `v=0xFF` — the reader is not on the bus; see Troubleshooting.
+- `NOWIRE,<n>` — the bridge sent a cabinet this board doesn't own.
+
+## Slot distances (empty shelf, cm)
+
+Each slot's sensor reads this with **no tool in it** (measured 2026-09-18, "not yet very accurate").
+They live in the `CABS` tables in the sketch as the third number of each `{TRIG,ECHO,emptyCm}`.
+Thresholds derive from them: **absent** = within `ABSENT_MARGIN_CM` (1.0) of the shelf, **present**
+= more than `PRESENT_MARGIN_CM` (2.0) closer than the shelf, hold-previous in between. A tool body
+reads ~4 cm, so a global pair could not fit both a 6.5 cm and a 14 cm shelf.
+
+| Locker | A | B | C | D |
+|---|---|---|---|---|
+| 1 Pliers | 12 | 12 | 10.5 | 10.5 |
+| 2 Side Cutter | 14 | 14 | 10.5 | 10.5 |
+| 3 Wire Crimper | 13.5 | 13.5 | 11.5 | 11.5 |
+| 4 Clamp Meter | 11 | 11 | 7.5 | 7 |
+| 5 Multimeter | 11 | 11.5 | 9 | 9 |
+| 6 Screwdriver Set | 8.5 | 8.5 | 6.5 | 6.5 |
+| 7 Wire Stripper | 12 | 12 | 10 | 10 |
+| 8 Soldering Iron | 12.5 | 12.5 | 10 | 10 |
+| 9 Makita Drill A | 7 | | | |
+| 10 Makita Drill B | 7 | | | |
+
+To re-measure: `USS` prints every slot as `USS,<cab>,<slot>,<trig>/<echo>,<live cm>,empty=<table cm>`
+with the cabinets empty — the live number *is* the new table value. Then watch the `#slot` stream
+during a real borrow: a slot that never shows `P` with the tool in it needs a bigger
+`PRESENT_MARGIN_CM` gap for that shelf, or the sensor is not seeing the tool's body.
 
 ## Serial protocol
 | Dir | Message | Meaning |
@@ -126,11 +203,28 @@ slot is `0`. Flip it to `true` once the ultrasonics are wired.
 | Mega→PC | `#<banner>` | informational; the bridge logs and ignores it |
 | Mega→PC | `READY,<controller_id>` | booted; says which board this is |
 | Mega→PC | `OPENED,<cabinet>` | cabinet unlocked |
-| Mega→PC | `SCAN,<uid>` | a tag was read while waiting |
+| Mega→PC | `MOVED,<cabinet>,<slot>` | slot sensor saw the tool go/return (sent at once with slot `0` on a tag-only cabinet) |
+| Mega→PC | `SCAN,<uid>` | a tag was read (beeps inside an open window) |
 | Mega→PC | `DONE,<cabinet>,<uid>,<slot>` | confirmed → bridge records it (slot 1..N, 0 = unknown) |
 | Mega→PC | `TIMEOUT,<cabinet>` | gave up, relocked |
 | Mega→PC | `NOWIRE,<cabinet>` | that cabinet belongs to the **other** controller |
 | Mega→PC | `ERR,<line>` | command not understood |
+
+**Bring-up / diagnostic commands** (type them in the Serial Monitor, or drop one into
+`firmware/bridge/inject.txt` while the bridge is running):
+
+| Command | What it does |
+|---|---|
+| `SELFTEST` | RC522 version, antenna, gain, REQA/WUPA probes, one full read; relay pin map |
+| `USS` | ping every sensor in the table once |
+| `SCANECHO` / `SCANALL` | find pins that have a sensor ECHO on them (pull-up probe) |
+| `PING,<trig>,<echo>[,us]` | read one arbitrary pair, optional trigger pulse width |
+| `TRACE,<trig>,<echo>` | record what ECHO actually does for 60 ms after one trigger |
+| `HOLD,<pin>,<0\|1\|x>` / `LINK,<a>,<b>` / `PULSE,<pin>,<ms>` | wiring probes: drive a pin, check two pins for a short, pulse a relay candidate |
+| `SLOTDBG,<0\|1>` | sensor sample stream on/off |
+| `IDLESCAN,<0\|1>` | idle tag reporting on/off (must be OFF during RF diagnostics) |
+| `GAIN,<0-7>` | RC522 receiver gain, live (reset by the per-OPEN reinit) |
+| `SIMTAG,<uid>` | stand in for a tag scan inside an open window (`ALLOW_SIMTAG` only) |
 
 > `DONE` has **four** fields. Parsing only three glues `,<slot>` onto the UID, and because
 > `Tool::normTag` strips separators but keeps digits, the tag then never matches any tool and
@@ -142,7 +236,10 @@ On the mini PC (see also `../SETUP-FRESH-PC.md`):
 2. `pip install pyserial` (once)
 3. Set `firmware/bridge/config.ini` → `serial_port` (Device Manager → Ports) and make `api_key`
    match `DEVICE_API_KEY` in `laravel/.env`.
-4. Run the bridge — **GUI:** `python firmware/bridge/bridge_gui.py` · **headless:** `python bridge.py`.
+4. Run the bridge: `python firmware/bridge/bridge.py`. It is a daemon — it survives rejected tags,
+   server restarts and serial glitches on its own (unexpected errors are logged and the loop
+   continues; confirms the server could not be reached for are retried for 10 minutes).
+   After editing it, `python firmware/bridge/test_bridge.py` must still print `ALL SIX SCENARIOS PASS`.
 5. Upload `locker_controller.ino` (install the **MFRC522** library first; close Serial Monitor
    before running the bridge).
 6. On the touchscreen open `http://localhost:8000/terminal.html`, scan a student QR, pick a tool.
@@ -172,3 +269,17 @@ finalised — the tags themselves did not, they were only re-homed. See `Databas
   banned/overdue. Reseed if demo data went stale: `php artisan migrate:fresh --seed`.
 - **RC522 `0x00`/`0xFF`** → wiring; VCC must be 3.3V. Note **RST is D5** (it was D9 before the
   two-controller rewire).
+- **"Reads slow / sometimes doesn't read"** → in the bridge log, measure the gap between `SCAN,`
+  and `DONE,`. `SCAN` prompt but `DONE` late or absent = the **slot sensor** gate, not the reader
+  (tool not in the beam, or reading inside the hysteresis band — watch the `#slot` stream). `SCAN`
+  itself late or absent = the reader: check the `#rc522 reinit (open) v=0x..` line for that window
+  (`0x00`/`0xFF` = bus dead), then power (3.3 V rail sag under TX; add 10–100 µF at the module),
+  SPI lead length (>15–20 cm at 4 MHz is marginal), and antenna placement vs. the energised solenoid.
+- **Door stays open after Cancel** → the bridge is not running the current `bridge.py` (it sends
+  `ABORT` when the kiosk cancels), or `command-status` is failing — check its log.
+
+## Going to production
+- `#define BENCH_MODE 0` in `locker_controller.ino`, re-upload; the boot banner shows `bench=0`.
+- Delete the `inject.txt` hook in `bridge.py` (marked TEMPORARY).
+- Launch the kiosk with `?kiosk=1`; the browser fullscreen on the 1024×600 panel.
+- Rotate `DEVICE_API_KEY` (`laravel/.env`, `bridge/config.ini`, `terminal.js`) — the old one is public.

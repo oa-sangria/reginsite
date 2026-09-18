@@ -8,7 +8,10 @@ firmware/bridge/queue.jsonl
 Thumbs.db
 *.swp
 
-# Nested repo — has its own .git, not part of this repo
+# Nested repos — each has its own .git, not part of this project
 /LockerwithFirmware/
+/OA_LMS/
+/colegio_de_sta_monica_de_angat_api/
+/oa_gl/
 
 # Laravel subtree is covered by laravel/.gitignore (vendor/, .env, etc.)

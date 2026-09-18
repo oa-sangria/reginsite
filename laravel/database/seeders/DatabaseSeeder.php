@@ -36,13 +36,14 @@ class DatabaseSeeder extends Seeder
         Setting::put('terms',
             "TERMS & CONDITIONS — Tool Borrowing\n\n"
             . "1. Tools must be returned within 8 HOURS of borrowing. A reminder is issued at the 8-hour mark.\n"
-            . "2. You may not borrow another tool while you have an OVERDUE or unreturned item — return it first.\n"
+            . "2. You may have up to 3 tools out at a time. You may not borrow while you have an OVERDUE item — return it first.\n"
             . "3. Tools left overdue for 2 days or more will result in a 2-DAY BORROWING BAN.\n"
             . "4. Inspect the tool before removing it. Report any damage to the laboratory custodian.\n"
             . "5. Return the tool to its ASSIGNED locker and scan its RFID tag to complete the return.\n"
             . "6. You are responsible for any loss or damage to the borrowed tool.\n\n"
             . "By selecting BORROW you agree to these Terms & Conditions.");
         Setting::put('borrow_limit_hours', '8');
+        Setting::put('max_open_borrows', '3');
         Setting::put('ban_trigger_days', '2');
         Setting::put('ban_length_days', '2');
 
