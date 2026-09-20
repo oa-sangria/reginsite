@@ -10,7 +10,7 @@
 
    URL flags:
      ?kiosk=1     production mode — hides the bench-test affordances
-                  (demo IDs, simulated tag entry, BENCH MODE badge, Admin link)
+                  (simulated tag entry, BENCH MODE badge, Admin link)
      ?station=03  label shown in the equipment bar
    ========================================================================== */
 (function () {
@@ -94,7 +94,7 @@
   // One glyph per real tool type in the seeded inventory.
   var ICONS = [
     [/solder/i, "t-soldering"], [/plier/i, "t-plier"], [/clamp/i, "t-clamp"],
-    [/multi(tester|meter)|metro/i, "t-multitester"], [/screwdriver/i, "t-screwdriver"],
+    [/tape/i, "t-tape"], [/multi(tester|meter)|metro/i, "t-multitester"], [/screwdriver/i, "t-screwdriver"],
     [/cutter/i, "t-cutter"], [/drill|makita/i, "t-drill"],
     [/strip/i, "t-stripper"], [/crimp/i, "t-crimper"]
   ];
@@ -238,14 +238,9 @@
     S = { idle: true };
     stopPoll(); disarmIdle();
     hint("Scanner ready · present your ID to the reader");
-    var demo = KIOSK ? "" :
-      '<div style="margin-top:14px">' +
-        '<p class="k-sect" style="margin-bottom:6px">Bench IDs</p>' +
-        '<div class="k-chips">' +
-          ["2023101132", "2023102906", "2023106548"].map(function (q) {
-            return '<button class="k-chip" data-qr="' + q + '">' + q + "</button>";
-          }).join("") +
-        "</div></div>";
+    // No one-tap demo IDs here, even on the bench: signing in has to go through
+    // the reader or a keyed-in number, so a test never skips the step a student
+    // will actually face.
     stage(
       '<div class="k-split k-split--scan">' +
         '<div class="k-reader">' +
@@ -263,15 +258,12 @@
             '<input id="qrInput" class="k-input" placeholder="or key in your student no." ' +
               'inputmode="numeric" autocomplete="off" spellcheck="false" />' +
             '<button class="k-btn k-btn--primary" id="scanBtn">' + ico("i-qr") + "Scan</button>" +
-          "</div>" + demo +
+          "</div>" +
         "</div>" +
       "</div>");
     on("scanBtn", function () { var v = el("qrInput").value.trim(); if (v) doScan(v); });
     el("qrInput").addEventListener("keydown", function (e) {
       if (e.key === "Enter") { e.stopPropagation(); var v = el("qrInput").value.trim(); if (v) doScan(v); }
-    });
-    Array.prototype.forEach.call(document.querySelectorAll(".k-chip"), function (b) {
-      b.addEventListener("click", function () { doScan(b.getAttribute("data-qr")); });
     });
   }
 

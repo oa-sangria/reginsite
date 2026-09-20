@@ -100,22 +100,27 @@ const bool ALLOW_SIMTAG = BENCH_MODE;
 bool idleScanEnabled = BENCH_MODE;
 
 /* SLOTDBG,0|1 — stream every slot sample during an OPEN window as
-   "#slot,<cab>,<slot>,<cm>,<raw>,<filled>" so threshold problems are visible
+   "#slot,<cab>,<slot>,<cm>,<delta>,<changed>" so detection problems are visible
    instead of inferred. Chatty (~16 lines/s), which is why the bridge drains its
    serial buffer in bulk; set false once slots are trusted. */
 bool slotDebug = BENCH_MODE;
 
 const uint8_t MAX_SLOTS = 4;
 
-/* emptyCm: what this slot's sensor reads with NO tool in it (the shelf behind).
-   0 = not measured yet -> the global PRESENT_CM/ABSENT_CM fallback applies. */
+/* emptyCm: what this slot's sensor read with NO tool in it, the day it was
+   wired. REFERENCE ONLY since 2026-09-18 — detection no longer compares against
+   it (see "Per-slot ultrasonic" below); it is kept so a sensor that drifts far
+   from its original number stands out in the #slot stream. */
 struct Slot    { uint8_t trig, echo; float emptyCm; };
 struct Cabinet { uint8_t number, relayPin, slots; Slot slot[MAX_SLOTS]; };
 
-/* Debounced per-slot occupancy. Declared up here with the other structs because
-   the Arduino IDE injects auto-generated function prototypes near the top of the
-   file — anything they reference must already be known at that point. */
-struct SlotState { bool filled, cand; uint8_t agree, miss; };
+/* Per-slot change detector. baseCm is what the slot read just before the door
+   opened (<0 = no echo then, slot is ignored); `changed` latches once the
+   reading has moved by CHANGE_CM for AGREE_N samples in a row. Declared up here
+   with the other structs because the Arduino IDE injects auto-generated function
+   prototypes near the top of the file — anything they reference must already be
+   known at that point. */
+struct SlotState { float baseCm, lastCm; uint8_t agree, miss; bool changed; };
 
 /* A0..A15 == D54..D69 on the Mega; ALL of them are full digital I/O.
    (The "A6/A7 are analog-input-only" rule is Uno/Nano — it does NOT apply here.)
@@ -129,7 +134,7 @@ const Cabinet CABS[NUM_CABS] = {
   {    2,  A13,   4, { {30,31,14.0}, {32,33,14.0}, {34,35,10.5}, {36,37,10.5}   } },  // USS 5-8   Side Cutter
   {    3,    6,   4, { {38,39,13.5}, {40,41,13.5}, {42,43,11.5}, {44,45,11.5}   } },  // USS 9-12  Wire Crimper
   {    4,    7,   4, { {46,47,11.0}, {48,49,11.0}, {A0,A1,7.5},  {A2,A3,7.0}    } },  // USS 13-16 Clamp Meter
-  {    5,    8,   4, { {A4,A5,11.0}, {A6,A7,11.5}, {A8,A9,9.0},  {A10,A11,9.0}  } },  // USS 17-20 Multimeter
+  {    5,    8,   4, { {A4,A5,11.0}, {A6,A7,11.5}, {A8,A9,9.0},  {A10,A11,9.0}  } },  // USS 17-20 Meter Tape
 };
 #else
 const uint8_t NUM_CABS = 5;
@@ -148,25 +153,22 @@ const Cabinet CABS[NUM_CABS] = {
 #endif
 
 const bool  ACTIVE_LOW = true;                 // relay board polarity
-/* Per-slot thresholds, derived from each slot's measured empty-shelf distance
-   (Slot.emptyCm in the tables above):
-     ABSENT  when  d >= emptyCm - ABSENT_MARGIN_CM    (reading is "the shelf")
-     PRESENT when  d <= emptyCm - PRESENT_MARGIN_CM   (something is well in front of it)
-   Between the two the slot holds its previous state (hysteresis). The margins
-   are the two numbers to tune once the distances are trusted: raise
-   PRESENT_MARGIN if empty slots flicker "in"; lower it if a tool sitting close
-   to the shelf never registers. The shelf reads 6.5-14cm across the cabinets
-   and a tool body ~4cm (Locker 2 slot 1, 2026-09-15: IN 4.0, 3.9-4.4), so a
-   fixed pair could not fit every slot — the shallow ones would never read
-   empty. A tool too small to reach the beam reads identically in and out;
-   the sensor must see the tool's BODY, not the shelf beside it.
-   Slots with emptyCm = 0 (not measured) fall back to the global pair. */
-const float ABSENT_MARGIN_CM  = 1.0;
-const float PRESENT_MARGIN_CM = 2.0;
-const float PRESENT_CM = 5.9;                  // fallback: <= this = tool in the slot
-const float ABSENT_CM  = 7.4;                  // fallback: >= this = slot empty
-const uint8_t       AGREE_N          = 2;      // samples that must agree to flip a slot
-const uint8_t       MISS_LIMIT       = 3;      // consecutive no-echoes before flagging
+/* Slot detection is RELATIVE: each slot's reading just before the door opens is
+   its baseline, and the slot counts as "moved" once the reading differs from
+   that baseline by CHANGE_CM (either direction) for AGREE_N samples in a row.
+   The absolute PRESENT/ABSENT thresholds this replaced (2026-09-18) needed every
+   slot's empty-shelf distance calibrated to the centimetre; with the values a
+   bit off, Locker 1 judged every slot empty before the door opened, so a lifted
+   tool could never register. Relative detection does not care what the shelf
+   or the tool measure, only that the number moved.
+   Tune CHANGE_CM: the sensors jitter ~0.5cm between samples; 2.0 keeps clear of
+   that. Lower it if a lift never shows in the #slot stream, raise it if a slot
+   trips while nothing was touched. A sensor that had an echo at baseline and
+   then loses it for MISS_LIMIT samples also counts as moved — a removed tool
+   can leave the beam pointing at nothing near enough to answer. */
+const float         CHANGE_CM        = 2.0;
+const uint8_t       AGREE_N          = 2;      // consecutive samples past CHANGE_CM to trip
+const uint8_t       MISS_LIMIT       = 3;      // consecutive no-echoes after a good baseline = moved
 const unsigned long ECHO_TIMEOUT_US  = 12000;  // ~2 m; a dead sensor costs 12ms not 30
 const uint8_t       SENSOR_SETTLE_MS = 60;     // HC-SR04 datasheet measurement cycle
 /* How long a door stays unlocked waiting for lift + tag. 20s was tight for a
@@ -246,50 +248,61 @@ float pingCm(const Slot &s) {
   return dur == 0 ? -1.0 : dur * 0.0343 / 2.0;
 }
 
-/* One trigger + one echo + debounce. A missed echo is NOT "absent" — it is no
-   sample at all, so it must not feed the debouncer. */
+/* One trigger + one echo, compared against the slot's baseline. A missed echo
+   is NOT a distance — it feeds the miss counter, never the delta debouncer. A
+   slot with no baseline (no echo before the door opened) is only logged. */
 void sampleSlot(const Cabinet &c, uint8_t s, SlotState *st) {
   float d = pingCm(c.slot[s]);
+  bool hasBase = st[s].baseCm >= 0;
   if (d < 0) {
     if (st[s].miss < 255) st[s].miss++;
-    if (slotDebug) { Serial.print(F("#slot,")); Serial.print(c.number); Serial.print(','); Serial.print(s + 1); Serial.println(F(",none")); }
+    if (hasBase && st[s].miss >= MISS_LIMIT) st[s].changed = true;
+    if (slotDebug) {
+      Serial.print(F("#slot,")); Serial.print(c.number); Serial.print(','); Serial.print(s + 1);
+      Serial.print(F(",none,miss=")); Serial.print(st[s].miss);
+      Serial.print(F(",changed=")); Serial.println(st[s].changed ? 1 : 0);
+    }
     return;
   }
   st[s].miss = 0;
+  st[s].lastCm = d;
 
-  float empty     = c.slot[s].emptyCm;
-  float presentAt = empty > 0 ? empty - PRESENT_MARGIN_CM : PRESENT_CM;
-  float absentAt  = empty > 0 ? empty - ABSENT_MARGIN_CM  : ABSENT_CM;
-
-  bool raw; char rawc;
-  if      (d <= presentAt) { raw = true;  rawc = 'P'; }
-  else if (d >= absentAt)  { raw = false; rawc = 'A'; }
-  else                     { rawc = '-'; }
-
-  if (rawc != '-') {
-    if (raw == st[s].cand) {
+  float delta = hasBase ? d - st[s].baseCm : 0;
+  if (hasBase) {
+    if (fabs(delta) >= CHANGE_CM) {
       if (st[s].agree < AGREE_N) st[s].agree++;
-      if (st[s].agree >= AGREE_N) st[s].filled = raw;
+      if (st[s].agree >= AGREE_N) st[s].changed = true;
     } else {
-      st[s].cand = raw;
-      st[s].agree = 1;
+      st[s].agree = 0;
     }
   }
   if (slotDebug) {
     Serial.print(F("#slot,")); Serial.print(c.number); Serial.print(','); Serial.print(s + 1);
-    Serial.print(','); Serial.print(d, 1); Serial.print(','); Serial.print(rawc);
-    Serial.print(F(",filled=")); Serial.println(st[s].filled ? 1 : 0);
+    Serial.print(','); Serial.print(d, 1);
+    Serial.print(F(",d=")); if (delta >= 0) Serial.print('+'); Serial.print(delta, 1);
+    Serial.print(F(",changed=")); Serial.println(st[s].changed ? 1 : 0);
   }
 }
 
-/* Blocking baseline sweep, once, before the door opens. */
+/* Blocking baseline sweep, once, before the door opens: each slot's baseline
+   is the average of the echoes it returned over BASE_PASSES pings. A slot that
+   never answered gets baseCm = -1 and is ignored for the rest of the window. */
+const uint8_t BASE_PASSES = 3;
 void baselineSweep(const Cabinet &c, SlotState *st) {
-  for (uint8_t s = 0; s < c.slots; s++) { st[s].filled = false; st[s].cand = false; st[s].agree = 0; st[s].miss = 0; }
-  for (uint8_t pass = 0; pass < AGREE_N; pass++) {
+  float sum[MAX_SLOTS]; uint8_t n[MAX_SLOTS];
+  for (uint8_t s = 0; s < c.slots; s++) {
+    st[s].baseCm = -1; st[s].lastCm = -1; st[s].agree = 0; st[s].miss = 0; st[s].changed = false;
+    sum[s] = 0; n[s] = 0;
+  }
+  for (uint8_t pass = 0; pass < BASE_PASSES; pass++) {
     for (uint8_t s = 0; s < c.slots; s++) {
-      sampleSlot(c, s, st);
+      float d = pingCm(c.slot[s]);
+      if (d >= 0) { sum[s] += d; n[s]++; } else if (st[s].miss < 255) st[s].miss++;
       delay(SENSOR_SETTLE_MS);                  // never fire two sensors back to back
     }
+  }
+  for (uint8_t s = 0; s < c.slots; s++) {
+    if (n[s]) { st[s].baseCm = sum[s] / n[s]; st[s].lastCm = st[s].baseCm; st[s].miss = 0; }
   }
 }
 
@@ -492,7 +505,7 @@ void handleOpen(uint8_t cabNum, const char *mode) {
     return;
   }
   const Cabinet &c = CABS[ci];
-  bool wantFill    = (strcmp(mode, "return") == 0);
+  (void) mode;   // borrow and return are detected the same way (see step 2 below)
   bool haveSensors = SENSORS_ENABLED && c.slots > 0 && c.slot[0].trig != 0;
 
 #if HAS_RFID
@@ -503,25 +516,26 @@ void handleOpen(uint8_t cabNum, const char *mode) {
 #endif
 
   SlotState st[MAX_SLOTS];
-  bool baseline[MAX_SLOTS];
   if (haveSensors) {
     baselineSweep(c, st);
     /* If not one slot answered a single ping, this cabinet's sensors are not
        wired (or dead). Degrade to tag-only rather than demanding a slot change
        that can never be seen — otherwise every borrow here would time out. */
     bool anyAlive = false;
-    for (uint8_t s = 0; s < c.slots; s++) if (st[s].miss < AGREE_N) anyAlive = true;
+    for (uint8_t s = 0; s < c.slots; s++) if (st[s].baseCm >= 0) anyAlive = true;
     if (!anyAlive) {
       haveSensors = false;
       Serial.print(F("#cab ")); Serial.print(cabNum);
       Serial.println(F(": no sensor echo - confirming on tag only"));
-    } else {
-      for (uint8_t s = 0; s < c.slots; s++) baseline[s] = st[s].filled;
-      if (slotDebug) {
-        Serial.print(F("#baseline,")); Serial.print(cabNum);
-        for (uint8_t s = 0; s < c.slots; s++) { Serial.print(','); Serial.print(baseline[s] ? F("IN") : F("out")); }
-        Serial.println();
+    } else if (slotDebug) {
+      /* "#baseline,<cab>,<cm|none>..." — the distances every slot will be
+         judged against for this window. */
+      Serial.print(F("#baseline,")); Serial.print(cabNum);
+      for (uint8_t s = 0; s < c.slots; s++) {
+        Serial.print(',');
+        if (st[s].baseCm >= 0) Serial.print(st[s].baseCm, 1); else Serial.print(F("none"));
       }
+      Serial.println();
     }
   }
 
@@ -564,13 +578,16 @@ void handleOpen(uint8_t cabNum, const char *mode) {
     }
 #endif
 
-    /* 2) ONE sensor per settle interval, round-robin. */
+    /* 2) ONE sensor per settle interval, round-robin. Borrow and return are
+          the same test — the slot's distance moved away from its baseline —
+          so `mode` is not consulted here; a returned tool moves the reading
+          just as a lifted one does. */
     if (haveSensors && changedSlot < 0 && millis() - lastPing >= SENSOR_SETTLE_MS) {
       lastPing = millis();
       sampleSlot(c, nextSlot, st);
       nextSlot = (nextSlot + 1) % c.slots;
       for (uint8_t s = 0; s < c.slots; s++) {
-        if (wantFill ? (!baseline[s] && st[s].filled) : (baseline[s] && !st[s].filled)) {
+        if (st[s].changed) {
           changedSlot = s;
           /* Informational, for the kiosk's step rail ("lift the tool" done). */
           Serial.print(F("MOVED,")); Serial.print(cabNum); Serial.print(','); Serial.println(s + 1);

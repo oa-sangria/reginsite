@@ -37,6 +37,7 @@ class FakeSerial:
 
     def write(self, b):
         self.writes.append(b.decode("utf-8").strip())
+        H.writer = self          # which fake port the bridge just wrote to
         H.on_write(self.writes[-1])
 
     def readline(self):
@@ -81,6 +82,7 @@ class Harness:
         self.scenario = scenario
         self.calls = []
         self.ser = None
+        self.writer = None
         self.ticks = 0
         self.stage = 0
         self.commands_served = False
@@ -173,13 +175,22 @@ class ScenarioLateDone:
 import bridge
 
 _serial = None
+_serials = {}                 # port -> FakeSerial, for the two-board scenario
 _orig_init = FakeSerial.__init__
-def _capture_init(self, *a, **k):
+def _capture_init(self, port, *a, **k):
     global _serial
-    _orig_init(self, *a, **k)
+    _orig_init(self, port, *a, **k)
+    self.port = port
     _serial = self
+    _serials[port] = self
     H.ser = self
 FakeSerial.__init__ = _capture_init
+
+# The protocol scenarios run against ONE fake board; the real config.ini lists
+# two ports, which would split the scripted lines across two FakeSerials.
+PORTS = ["COM5"]
+bridge.load_config = lambda: {"ports": list(PORTS), "baud": 115200,
+                              "base_url": "http://localhost:8000", "api_key": "test"}
 
 _orig_readline = FakeSerial.readline
 def _readline_with_end(self):
@@ -195,6 +206,7 @@ bridge.POLL_EVERY = 0.0
 def run(name, scenario):
     global H
     H = Harness(scenario)
+    _serials.clear()
     out = io.StringIO()
     real_stdout = sys.stdout
     sys.stdout = out
@@ -212,22 +224,24 @@ def run(name, scenario):
     print("\n".join("  " + l for l in log.strip().splitlines()[3:]))
     return H, log
 
+# Every board gets a WHO right after its port opens (identity handshake); the
+# board answers with its banner + READY. Until it does, it is logged by port.
 # A — cancel
 h, log = run("A: kiosk cancel -> ABORT", ScenarioCancel())
-assert h.ser.writes == ["OPEN,2,borrow", "ABORT"], h.ser.writes
+assert h.ser.writes == ["WHO", "OPEN,2,borrow", "ABORT"], h.ser.writes
 assert not any(p == "confirm" for _, p, _ in h.calls), "no confirm on cancel"
 assert "ABORT locker 2" in log and "already timeout" in log
-assert "[mega] TIMEOUT,2" in log and "timed out; cancelled" not in log, "TIMEOUT after ABORT must be ignored"
+assert "[COM5] TIMEOUT,2" in log and "timed out; cancelled" not in log, "TIMEOUT after ABORT must be ignored"
 
 # B — normal
 h, log = run("B: normal DONE -> confirm", ScenarioDone())
-assert h.ser.writes == ["OPEN,3,borrow"], h.ser.writes
+assert h.ser.writes == ["WHO", "OPEN,3,borrow"], h.ser.writes
 assert [(m, p) for m, p, _ in h.calls].count(("POST", "confirm")) == 1
 assert "BORROW saved: Soldering Iron 2 (tx #9)" in log, log
 
 # C — late DONE
 h, log = run("C: DONE after server closed it", ScenarioLateDone())
-assert h.ser.writes == ["OPEN,1,return"], h.ser.writes
+assert h.ser.writes == ["WHO", "OPEN,1,return"], h.ser.writes
 assert "confirm ignored: already timeout" in log, log
 assert "? saved" not in log and "None" not in log
 
@@ -307,7 +321,176 @@ class ScenarioProgress:
 h, log = run("F: progress relay", ScenarioProgress())
 prog = [pl for _, p, pl in h.calls if p == "command-progress"]
 assert prog == [{"command_id": 12, "stage": "moved"}, {"command_id": 12, "stage": "scanned"}], prog
-assert "[mega] SCAN,AA BB CC DD" in log      # idle scan logged but not relayed
+assert "[COM5] SCAN,AA BB CC DD" in log      # idle scan logged but not relayed
 assert "RETURN saved: Pliers 2 (tx #13)" in log
 
-print("\nALL SIX SCENARIOS PASS")
+# ---------------------------------------------------------------------------
+# G — two controllers: OPEN for cabinet 7 goes to the board that announced
+# cabinets=6-10 (whichever COM port it is on), and so does the ABORT.
+BANNER = "#reginsite locker-controller controller={id} cabinets={lo}-{hi} rfid={rf} sensors=1 bench=0"
+class ScenarioTwoBoards:
+    def on_api(self, h, path, payload):
+        if path == "commands":
+            if not h.commands_served:
+                h.commands_served = True
+                return {"ok": True, "commands": [{"id": 20, "type": "open", "lockerId": "7", "mode": "borrow"}]}
+            return {"ok": True, "commands": []}
+        if path == "command-status":
+            h.stage += 1
+            if h.stage == 1:
+                return {"ok": True, "status": "sent", "note": None}
+            return {"ok": True, "status": "timeout", "note": "Cancelled at the kiosk"}
+        if path == "confirm":
+            raise AssertionError(f"confirm must NOT be posted, got {payload}")
+        raise AssertionError(path)
+
+    def on_write(self, h, line):
+        w = h.writer
+        if line == "WHO":
+            # Ports are deliberately "swapped": controller 2 is on COM5.
+            if w.port == "COM5":
+                w.lines += [BANNER.format(id=2, lo=6, hi=10, rf=0), "READY,2"]
+            else:
+                w.lines += [BANNER.format(id=1, lo=1, hi=5, rf=1), "READY,1"]
+        elif line == "ABORT":
+            w.lines += ["TIMEOUT,7", "__END__"]
+
+PORTS[:] = ["COM8", "COM5"]      # listed in the "wrong" order on purpose
+h, log = run("G: two boards -> routed by announced cabinet range", ScenarioTwoBoards())
+PORTS[:] = ["COM5"]
+assert _serials["COM5"].writes == ["WHO", "OPEN,7,borrow", "ABORT"], _serials["COM5"].writes
+# The reader board's idle scan is armed while the reader-less door is open and
+# put back (bench=0) once the ABORT closes it.
+assert _serials["COM8"].writes == ["WHO", "IDLESCAN,1", "IDLESCAN,0"], _serials["COM8"].writes
+assert "OPEN locker 7 (borrow) [cmd 20] -> mega2" in log, log
+assert "ABORT locker 7 on mega2" in log, log
+assert "[mega2] TIMEOUT,7" in log and "timed out; cancelled" not in log
+
+# H — one board only, cabinet on the other (unplugged) controller: the live
+# board answers NOWIRE and the command is cancelled with reason "nowire".
+class ScenarioNowire:
+    def on_api(self, h, path, payload):
+        if path == "commands":
+            if not h.commands_served:
+                h.commands_served = True
+                return {"ok": True, "commands": [{"id": 21, "type": "open", "lockerId": "9", "mode": "borrow"}]}
+            return {"ok": True, "commands": []}
+        if path == "command-status":
+            return {"ok": True, "status": "sent", "note": None}
+        if path == "confirm":
+            assert payload == {"command_id": 21, "timeout": True, "reason": "nowire"}, payload
+            _serial.lines.append("__END__")
+            return {"ok": True, "result": "cancelled", "status": "timeout"}
+        raise AssertionError(path)
+
+    def on_write(self, h, line):
+        if line == "WHO":
+            h.writer.lines += [BANNER.format(id=1, lo=1, hi=5, rf=1), "READY,1"]
+        elif line.startswith("OPEN,"):
+            h.writer.lines.append("NOWIRE,9")
+
+h, log = run("H: cabinet on a missing controller -> NOWIRE -> cancelled", ScenarioNowire())
+assert h.ser.writes == ["WHO", "OPEN,9,borrow"], h.ser.writes
+assert "locker 9 is NOT on mega1; cancelled" in log, log
+
+# ---------------------------------------------------------------------------
+# I/J/K — cabinet on the READER-LESS board (controller 2). Its DONE carries an
+# empty tag; the tag comes from controller 1's idle scan and the bridge pairs
+# the two. I: lift first, then tap. J: tap first, then lift. K: never tapped.
+def two_board_who(h, line):
+    w = h.writer
+    if line == "WHO":
+        if w.port == "COM5":
+            w.lines += [BANNER.format(id=1, lo=1, hi=5, rf=1), "READY,1"]
+        else:
+            w.lines += [BANNER.format(id=2, lo=6, hi=10, rf=0), "READY,2"]
+        return True
+    return False
+
+class ScenarioPairLiftThenTap:
+    def __init__(self): self.confirmed = False
+    def on_api(self, h, path, payload):
+        if path == "commands":
+            if not h.commands_served:
+                h.commands_served = True
+                return {"ok": True, "commands": [{"id": 30, "type": "open", "lockerId": "7", "mode": "borrow"}]}
+            if self.confirmed:
+                _serials["COM8"].lines.append("__END__")
+            return {"ok": True, "commands": []}
+        if path == "command-status":
+            h.stage += 1
+            if h.stage == 2:                      # DONE is being held -> now the student taps
+                _serials["COM5"].lines.append("SCAN,1E 3C 78 06")
+            return {"ok": True, "status": "sent", "note": None}
+        if path == "command-progress":
+            return {"ok": True, "status": "sent", "note": payload["stage"]}
+        if path == "confirm":
+            assert payload == {"command_id": 30, "uid": "1E 3C 78 06", "slot": 2}, payload
+            self.confirmed = True
+            return {"ok": True, "action": "borrow", "tool": "Wire Stripper 1",
+                    "result": {"txId": "31"}, "status": "done"}
+        raise AssertionError(path)
+    def on_write(self, h, line):
+        if two_board_who(h, line): return
+        if line.startswith("OPEN,"):
+            h.writer.lines += ["OPENED,7", "MOVED,7,2", "DONE,7,,2"]
+        elif line == "IDLESCAN,1":
+            h.writer.lines.append("#idlescan=1")
+        assert line != "ABORT"
+
+PORTS[:] = ["COM5", "COM8"]
+h, log = run("I: reader-less board, lift then tap -> paired", ScenarioPairLiftThenTap())
+assert _serials["COM8"].writes == ["WHO", "OPEN,7,borrow"], _serials["COM8"].writes
+assert _serials["COM5"].writes == ["WHO", "IDLESCAN,1", "IDLESCAN,0"], _serials["COM5"].writes
+assert "waiting up to 45s for the tag" in log and "tag 1E 3C 78 06 paired with cmd 30" in log, log
+assert "BORROW saved: Wire Stripper 1 (tx #31)" in log, log
+assert "REJECTED" not in log
+prog = [pl["stage"] for _, p, pl in h.calls if p == "command-progress"]
+assert prog == ["moved"], prog
+
+class ScenarioPairTapThenLift(ScenarioPairLiftThenTap):
+    def on_api(self, h, path, payload):
+        if path == "command-status":
+            h.stage += 1
+            if h.stage == 2:                      # tag already seen -> now the slot moves
+                _serials["COM8"].lines += ["MOVED,7,3", "DONE,7,,3"]
+            return {"ok": True, "status": "sent", "note": None}
+        if path == "confirm":
+            assert payload == {"command_id": 30, "uid": "74 D6 7B 06", "slot": 3}, payload
+            self.confirmed = True
+            return {"ok": True, "action": "borrow", "tool": "Wire Stripper 2",
+                    "result": {"txId": "32"}, "status": "done"}
+        return super().on_api(h, path, payload)
+    def on_write(self, h, line):
+        if two_board_who(h, line): return
+        if line.startswith("OPEN,"):
+            h.writer.lines.append("OPENED,7")
+        elif line == "IDLESCAN,1":
+            h.writer.lines += ["#idlescan=1", "SCAN,74 D6 7B 06"]
+
+h, log = run("J: reader-less board, tap then lift -> paired", ScenarioPairTapThenLift())
+assert _serials["COM5"].writes == ["WHO", "IDLESCAN,1", "IDLESCAN,0"], _serials["COM5"].writes
+assert "tag 74 D6 7B 06 held for locker 7" in log and "paired with cmd 30" in log, log
+assert "BORROW saved: Wire Stripper 2 (tx #32)" in log, log
+prog = [pl["stage"] for _, p, pl in h.calls if p == "command-progress"]
+assert prog == ["scanned", "moved"], prog
+
+class ScenarioPairNoTag(ScenarioPairLiftThenTap):
+    def on_api(self, h, path, payload):
+        if path == "command-status":
+            return {"ok": True, "status": "sent", "note": None}
+        if path == "confirm":
+            assert payload == {"command_id": 30, "timeout": True, "reason": "timeout"}, payload
+            self.confirmed = True
+            return {"ok": True, "result": "cancelled (timeout)", "status": "timeout"}
+        return super().on_api(h, path, payload)
+
+bridge.TAG_WAIT_S = 0.0
+h, log = run("K: reader-less board, slot moved but no tag -> timeout", ScenarioPairNoTag())
+bridge.TAG_WAIT_S = bridge.OPEN_WINDOW_S
+PORTS[:] = ["COM5"]
+assert "no tag tapped within 0s; cancelled" in log, log
+assert [(m, p) for m, p, _ in h.calls].count(("POST", "confirm")) == 1
+assert _serials["COM5"].writes == ["WHO", "IDLESCAN,1", "IDLESCAN,0"], _serials["COM5"].writes
+
+print("\nALL ELEVEN SCENARIOS PASS")

@@ -90,7 +90,7 @@ class DatabaseSeeder extends Seeder
             2  => ['Side Cutter',     'Side Cutter',    1, ['1A:D9:78:06', '5C:D8:7A:06', 'BA:F0:7B:06', '63:75:7B:06']],
             3  => ['Wire Crimper',    'Wire Crimper',   1, ['CB:56:CF:83', '63:98:66:06', 'E1:C9:66:06', '87:3A:7C:06']],
             4  => ['Clamp Meter',     'Clamp Meter',    1, ['CE:B8:7C:06', '4E:B0:78:06', 'D6:42:7B:06', '72:8B:79:06']],
-            5  => ['Multimeter',      'Multimeter',     1, ['C5:CB:7A:06', '0D:6B:7A:06', 'F4:38:7C:06', 'DE:73:7B:06']],
+            5  => ['Meter Tape',      'Meter Tape',     1, ['C5:CB:7A:06', '0D:6B:7A:06', 'F4:38:7C:06', 'DE:73:7B:06']],
             6  => ['Screwdriver Set', 'Screwdriver Set',1, ['F2:01:7A:06', '0C:D7:7B:06', '81:1C:7B:06', '8C:B3:7C:06']],
             7  => ['Wire Stripper',   'Wire Stripper',  1, ['1E:3C:78:06', '74:D6:7B:06', '56:CD:7C:06', '3B:86:7C:06']],
             8  => ['Soldering Iron',  'Soldering Iron', 1, ['A7:45:64:06', 'E9:8C:7B:06', 'B7:5D:7A:06', 'DB:F0:7B:06']],
@@ -145,7 +145,7 @@ class DatabaseSeeder extends Seeder
         };
         // Active (tx #1 = the overdue one that drives the ban)
         $mk(1, 'A7:45:64:06', 72, null);   // Kurt  — Soldering Iron 1 (cab 8), overdue 3 days -> banned
-        $mk(2, 'C5:CB:7A:06', 2,  null);   // Nhoel — Multimeter 1 (cab 5), on time
+        $mk(2, 'C5:CB:7A:06', 2,  null);   // Nhoel — Meter Tape 1 (cab 5), on time
         $mk(6, '1A:D9:78:06', 9,  null);   // Carlo — Side Cutter 1 (cab 2), overdue (>8h)
         // Returned today
         $mk(3, 'E5:77:7B:06', 28, 5);      // Bene  — Pliers 1 (cab 1)

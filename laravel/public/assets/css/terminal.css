@@ -546,14 +546,6 @@ html, body { height: 100%; margin: 0; overflow: hidden; }
 .k-input--sm { height: 44px; font-size: 13px; }
 .k-inputrow { display: flex; gap: 9px; align-items: center; }
 
-.k-chips { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
-.k-chip {
-  font: 700 11.5px/1 var(--k-mono); letter-spacing: .06em;
-  background: transparent; border: 1px dashed var(--k-line-2); color: var(--k-ink-2);
-  border-radius: 20px; padding: 8px 12px; cursor: pointer;
-}
-.k-chip:active { transform: translateY(1px); border-style: solid; border-color: var(--k-indigo); }
-
 /* Bench-test affordance — deliberately marked as not part of the real UI */
 .k-dev {
   display: flex; align-items: center; gap: 9px; flex: none;

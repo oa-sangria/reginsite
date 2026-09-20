@@ -54,7 +54,7 @@ Mega 1:
 | 2 | Side Cutter | A13 | ☐ |
 | 3 | Wire Crimper | D6 | ☐ |
 | 4 | Clamp Meter | D7 | ☐ |
-| 5 | Multimeter | D8 | ☐ |
+| 5 | Meter Tape | D8 | ☐ |
 
 **Polarity:** the solenoid unlocks when the pin is ☐ LOW (→ `ACTIVE_LOW = true`, the default)  ☐ HIGH
 
@@ -92,13 +92,14 @@ Mega 1 — tick each pair once verified:
 | 2 Side Cutter | ☐ 30/31 | ☐ 32/33 | ☐ 34/35 | ☐ 36/37 |
 | 3 Wire Crimper | ☐ 38/39 | ☐ 40/41 | ☐ 42/43 | ☐ 44/45 |
 | 4 Clamp Meter | ☐ 46/47 | ☐ 48/49 | ☐ A0/A1 | ☐ A2/A3 |
-| 5 Multimeter | ☐ A4/A5 | ☐ A6/A7 | ☐ A8/A9 | ☐ A10/A11 |
+| 5 Meter Tape | ☐ A4/A5 | ☐ A6/A7 | ☐ A8/A9 | ☐ A10/A11 |
 
 Mega 2 (*not built yet*): cabinets 6–8 use 22/23…44/45 as above; cabinet 9 = 46/47, cabinet 10 = 48/49.
 
 - ☐ Sensors are on the regulated 5 V rail, **not** the Mega's onboard regulator
       (~15 mA each; 20 sensors ≈ 300 mA peak)
-- ☐ `emptyCm` in the `CABS` tables matches a fresh `USS` reading for every slot (cabinets empty)
+- ☐ Every slot returns an echo in `USS` (a `none` slot is ignored by detection); lifting a tool
+      shows `d=` past ±2.0 and `changed=1` in the `#slot` stream
 - ☐ RC522: `SELFTEST` shows `v=0x92`/`0x91` + `antenna ON` **before and after** ten solenoid cycles
 - ☐ RC522: 10–100 µF across VCC/GND at the module; SPI leads as short as the mounting allows
 - ☐ RC522 antenna is not beside an energised solenoid or the relay-board wiring

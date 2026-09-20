@@ -17,8 +17,8 @@ firmware/
   locker_controller/locker_controller.ino   Arduino Mega firmware (screen-driven)
   rfid_read_test/rfid_read_test.ino         Standalone: prints tag UIDs (for enrolling tools)
   bridge/bridge.py                           mini-PC bridge (console; the only bridge)
-  bridge/config.ini                          serial_port, base_url, api_key
-  bridge/test_bridge.py                      six-scenario fake-serial test of the bridge (no hardware)
+  bridge/config.ini                          serial_ports (one per Mega), base_url, api_key
+  bridge/test_bridge.py                      eight-scenario fake-serial test of the bridge (no hardware)
   tests/rfid_usb_capture.html                what a USB keyboard-wedge RFID reader types
 ```
 
@@ -49,7 +49,7 @@ Buzzer: **D16** (note: that is TX2 — never add a Serial2 device on this board)
 | 2 | Side Cutter | A13 | 30/31 · 32/33 · 34/35 · 36/37 |
 | 3 | Wire Crimper | D6 | 38/39 · 40/41 · 42/43 · 44/45 |
 | 4 | Clamp Meter | D7 | 46/47 · 48/49 · A0/A1 · A2/A3 |
-| 5 | Multimeter | D8 | A4/A5 · A6/A7 · A8/A9 · A10/A11 |
+| 5 | Meter Tape | D8 | A4/A5 · A6/A7 · A8/A9 · A10/A11 |
 
 `A0`–`A15` are `D54`–`D69` on a Mega and are full digital I/O. (The "A6/A7 are analog-input-only"
 rule is Uno/Nano — it does not apply here.)
@@ -141,9 +141,9 @@ The bridge console is the one place the whole chain is visible. A healthy borrow
   queued cmd 41 (locker 1, borrow)            <- kiosk tapped BORROW; server queued it
   <- OPEN locker 1 (borrow) [cmd 41]           <- bridge told the Mega
 [mega] #rc522 reinit (open) v=0x92             <- reader re-initialised for this window; 0x92 = alive
-[mega] #baseline,1,IN,IN,out,IN                <- what the 4 slots looked like before the door opened
+[mega] #baseline,1,none,none,10.4,12.3         <- what each slot read before the door opened (none = no echo)
 [mega] OPENED,1                                <- door unlocked; kiosk step 01 ticks
-[mega] #slot,1,3,10.4,A,filled=0               <- sensor samples (slotDebug) — cm, P/A/-, state
+[mega] #slot,1,3,10.5,d=+0.1,changed=0         <- sensor samples (slotDebug) — cm, delta from baseline, tripped?
 [mega] MOVED,1,2                               <- slot B saw the tool leave; kiosk step 02 ticks, step 03 spins
 [mega] SCAN,E5 77 7B 06                        <- tag read (Mega beeps once); kiosk step 03 ticks
 [mega] DONE,1,E5 77 7B 06,2                    <- both halves met; door relocked, double beep
@@ -168,13 +168,26 @@ Things that need attention:
 - `#rc522 reinit (open) v=0x00` or `v=0xFF` — the reader is not on the bus; see Troubleshooting.
 - `NOWIRE,<n>` — the bridge sent a cabinet this board doesn't own.
 
-## Slot distances (empty shelf, cm)
+## Slot detection (relative, since 2026-09-18)
 
-Each slot's sensor reads this with **no tool in it** (measured 2026-09-18, "not yet very accurate").
-They live in the `CABS` tables in the sketch as the third number of each `{TRIG,ECHO,emptyCm}`.
-Thresholds derive from them: **absent** = within `ABSENT_MARGIN_CM` (1.0) of the shelf, **present**
-= more than `PRESENT_MARGIN_CM` (2.0) closer than the shelf, hold-previous in between. A tool body
-reads ~4 cm, so a global pair could not fit both a 6.5 cm and a 14 cm shelf.
+A slot is not judged "full" or "empty" — the sketch has no idea what a tool or a shelf measures.
+Instead, just before the door opens it pings every slot three times and averages the echoes into a
+**baseline** (`#baseline,<cab>,...`). During the window a slot counts as **moved** once its reading
+differs from that baseline by `CHANGE_CM` (2.0) for `AGREE_N` (2) consecutive samples, in either
+direction — lifting a tool and putting one back both trip it. A slot that had a baseline and then
+returns no echo for `MISS_LIMIT` (3) samples also counts as moved. Slots with no echo at baseline
+are ignored for that window; if *no* slot answers, the cabinet degrades to tag-only.
+
+The absolute-threshold scheme this replaced needed every shelf calibrated to the centimetre and, with
+the numbers slightly off, judged Locker 1's slots empty before the door opened — so a lift could
+never register. Tune only `CHANGE_CM`: lower if a lift never shows `changed=1` in the `#slot`
+stream, raise if a slot trips with nothing touched (jitter between samples is ~0.5 cm).
+
+### Empty-shelf distances (reference, cm)
+
+Measured 2026-09-18 with no tool in the slot. Still in the `CABS` tables as the third number of each
+`{TRIG,ECHO,emptyCm}` but **not used for detection** — they are there so a sensor that drifts far
+from its original number stands out.
 
 | Locker | A | B | C | D |
 |---|---|---|---|---|
@@ -182,7 +195,7 @@ reads ~4 cm, so a global pair could not fit both a 6.5 cm and a 14 cm shelf.
 | 2 Side Cutter | 14 | 14 | 10.5 | 10.5 |
 | 3 Wire Crimper | 13.5 | 13.5 | 11.5 | 11.5 |
 | 4 Clamp Meter | 11 | 11 | 7.5 | 7 |
-| 5 Multimeter | 11 | 11.5 | 9 | 9 |
+| 5 Meter Tape | 11 | 11.5 | 9 | 9 |
 | 6 Screwdriver Set | 8.5 | 8.5 | 6.5 | 6.5 |
 | 7 Wire Stripper | 12 | 12 | 10 | 10 |
 | 8 Soldering Iron | 12.5 | 12.5 | 10 | 10 |
@@ -190,9 +203,9 @@ reads ~4 cm, so a global pair could not fit both a 6.5 cm and a 14 cm shelf.
 | 10 Makita Drill B | 7 | | | |
 
 To re-measure: `USS` prints every slot as `USS,<cab>,<slot>,<trig>/<echo>,<live cm>,empty=<table cm>`
-with the cabinets empty — the live number *is* the new table value. Then watch the `#slot` stream
-during a real borrow: a slot that never shows `P` with the tool in it needs a bigger
-`PRESENT_MARGIN_CM` gap for that shelf, or the sensor is not seeing the tool's body.
+with the cabinets empty. To check detection, watch the `#slot` stream during a real borrow: the
+lifted slot's `d=` should jump past ±2.0 and `changed=1` should follow within two samples. If `d=`
+barely moves when the tool leaves, the sensor is not looking at the tool's body — re-aim it.
 
 ## Serial protocol
 | Dir | Message | Meaning |
@@ -209,6 +222,15 @@ during a real borrow: a slot that never shows `P` with the tool in it needs a bi
 | Mega→PC | `TIMEOUT,<cabinet>` | gave up, relocked |
 | Mega→PC | `NOWIRE,<cabinet>` | that cabinet belongs to the **other** controller |
 | Mega→PC | `ERR,<line>` | command not understood |
+| PC→Mega 1 | `IDLESCAN,<0\|1>` | idle tag reporting on/off — the bridge arms it while a controller-2 door is open (below) |
+
+**Cabinets 6–10 have no reader.** Controller 2 sends `DONE,<cabinet>,,<slot>` with an *empty* uid
+as soon as the slot moves (door relocks then). The bridge holds that DONE, turns on controller 1's
+idle scan, and waits up to `TAG_WAIT_S` (45 s) for a `SCAN,<uid>` from controller 1's reader — the
+student taps the tool's tag on the one reader, whichever cabinet it came from. Tap-then-lift works
+too (the uid is parked until the DONE arrives). Then it confirms with that uid and puts the idle
+scan back to the board's `bench` default. No tap in time → `confirm {timeout, reason: timeout}`.
+In the bridge log: `waiting up to 45s for the tag on the reader` → `tag … paired with cmd N`.
 
 **Bring-up / diagnostic commands** (type them in the Serial Monitor, or drop one into
 `firmware/bridge/inject.txt` while the bridge is running):
@@ -234,8 +256,9 @@ during a real borrow: a slot that never shows `P` with the tool in it needs a bi
 On the mini PC (see also `../SETUP-FRESH-PC.md`):
 1. `cd laravel && php artisan migrate:fresh --seed && php artisan serve`  (reseed = fresh demo data)
 2. `pip install pyserial` (once)
-3. Set `firmware/bridge/config.ini` → `serial_port` (Device Manager → Ports) and make `api_key`
-   match `DEVICE_API_KEY` in `laravel/.env`.
+3. Set `firmware/bridge/config.ini` → `serial_ports = COM5, COM8` (both Megas; Device Manager →
+   Ports; order doesn't matter — each board announces its cabinet range and the bridge routes by
+   that) and make `api_key` match `DEVICE_API_KEY` in `laravel/.env`.
 4. Run the bridge: `python firmware/bridge/bridge.py`. It is a daemon — it survives rejected tags,
    server restarts and serial glitches on its own (unexpected errors are logged and the loop
    continues; confirms the server could not be reached for are retried for 10 minutes).
@@ -262,7 +285,9 @@ finalised — the tags themselves did not, they were only re-homed. See `Databas
   happens for *every* scan, check the bridge is splitting `DONE` into four fields (see the protocol
   note above), not three.
 - **`NOWIRE,<n>`** → the bridge sent a cabinet this board doesn't own. Cabinets 1–5 are on
-  controller 1, 6–10 on controller 2. Check `CONTROLLER_ID` and which port the board is on.
+  controller 1, 6–10 on controller 2. Usually the other board is unplugged or missing from
+  `serial_ports` (the bridge falls back to whichever board is alive); otherwise check
+  `CONTROLLER_ID`. The bridge log shows each board as `[mega1]`/`[mega2]` once it has announced.
 - **Solenoids click / chatter on reset, or the board reboots in a loop** → the relay pull-ups are
   missing. See "Boot safety" above; firmware cannot fix this one.
 - **"not eligible"** → student's program isn't BIT Electrical/Mechatronics/HVAC&R, or they're
@@ -271,7 +296,8 @@ finalised — the tags themselves did not, they were only re-homed. See `Databas
   two-controller rewire).
 - **"Reads slow / sometimes doesn't read"** → in the bridge log, measure the gap between `SCAN,`
   and `DONE,`. `SCAN` prompt but `DONE` late or absent = the **slot sensor** gate, not the reader
-  (tool not in the beam, or reading inside the hysteresis band — watch the `#slot` stream). `SCAN`
+  (tool not in the beam, or the reading moved less than `CHANGE_CM` — watch `d=` in the `#slot`
+  stream). `SCAN`
   itself late or absent = the reader: check the `#rc522 reinit (open) v=0x..` line for that window
   (`0x00`/`0xFF` = bus dead), then power (3.3 V rail sag under TX; add 10–100 µF at the module),
   SPI lead length (>15–20 cm at 4 MHz is marginal), and antenna placement vs. the energised solenoid.
