@@ -15,11 +15,21 @@
      Mega -> DONE,<cabinet>,<uid>,<slot>   -> bridge records the borrow
      (return waits for a slot to become FILLED again)
      timeout -> TIMEOUT,<cabinet>, relock
+     ...then the cabinet is WATCHED for WATCH_MS more: the solenoid is locked
+     but the door is still physically open until the student shuts it, and a
+     second tool leaving would otherwise go unrecorded. Any slot other than
+     the one just reported that moves — during the window or the watch — is
+     an ALERT: the buzzer alarms for ALARM_MS, the bridge tells the server,
+     and CLEAR follows if the tool is put back.
 
    --- Serial protocol --------------------------------------------------------
    PC  -> Mega : OPEN,<cabinet>,<borrow|return>
                  WHO                      (re-announce identity, no reset)
                  ABORT                    (relock the open cabinet now)
+                 IDLESCAN,<0|1>           (controller 1: idle tag reporting)
+                 ALARM,<seconds>          (controller 1: sound the alarm; 0 = stop.
+                                           The bridge relays controller 2's ALERTs
+                                           here because that board has no buzzer)
    Mega-> PC   : #<banner>                (informational, bridge ignores)
                  READY,<controller_id>
                  OPENED,<cabinet>
@@ -29,7 +39,12 @@
                  SCAN,<uid>               (tag read; inside a window it beeps)
                  DONE,<cabinet>,<uid>,<slot>   (slot 1..N, 0 = unknown)
                  TIMEOUT,<cabinet>
+                 ALERT,<cabinet>,<slot>   (a slot OTHER than the reported one
+                                           moved: a tool left without a tag)
+                 CLEAR,<cabinet>,<slot>   (that slot is back at its baseline)
                  NOWIRE,<cabinet>         (that cabinet is on the OTHER board)
+                 FAULT,<cabinet>,<why>    (refused to open: nothing could confirm
+                                           a pickup — no reader AND no sensor echo)
                  ERR,<line>
 
    ----------------------------------------------------------------------------
@@ -115,12 +130,17 @@ struct Slot    { uint8_t trig, echo; float emptyCm; };
 struct Cabinet { uint8_t number, relayPin, slots; Slot slot[MAX_SLOTS]; };
 
 /* Per-slot change detector. baseCm is what the slot read just before the door
-   opened (<0 = no echo then, slot is ignored); `changed` latches once the
-   reading has moved by CHANGE_CM for AGREE_N samples in a row. Declared up here
+   opened (<0 = no echo then, slot is ignored); `changed` goes true once the
+   reading has moved by CHANGE_CM for AGREE_N samples in a row, and back to
+   false once it has sat within CHANGE_CM/2 of the baseline for AGREE_N samples
+   (a tool put back). It is a live state, not a latch, so a second tool that
+   leaves and returns can be told apart from one that is gone. `since` is when
+   it last went true; `alerted` = an ALERT line has been sent for this slot and
+   no CLEAR yet. Declared up here
    with the other structs because the Arduino IDE injects auto-generated function
    prototypes near the top of the file — anything they reference must already be
    known at that point. */
-struct SlotState { float baseCm, lastCm; uint8_t agree, miss; bool changed; };
+struct SlotState { float baseCm, lastCm; unsigned long since; uint8_t agree, miss; bool changed, alerted; };
 
 /* A0..A15 == D54..D69 on the Mega; ALL of them are full digital I/O.
    (The "A6/A7 are analog-input-only" rule is Uno/Nano — it does NOT apply here.)
@@ -176,6 +196,22 @@ const uint8_t       SENSOR_SETTLE_MS = 60;     // HC-SR04 datasheet measurement 
    above this (OPEN_WINDOW_S in bridge.py) — change both together. The kiosk's
    Cancel relocks early via ABORT, so the length only matters when nobody acts. */
 const unsigned long OPEN_TIMEOUT_MS  = 45000;
+/* After the solenoid relocks the door is still physically open until the
+   student shuts it. Keep sampling this cabinet's slots for WATCH_MS so a second
+   tool leaving (or one leaving after a TIMEOUT with no tag) is caught and
+   reported as ALERT. The watch ends early if the PC sends anything else — a
+   new OPEN must not wait behind it (the bridge's stale watchdog would fire).
+   ALARM_MS is how long the buzzer sounds after an ALERT (re-armed by each new
+   one; stops early if every extra slot is put back). The watch outlives
+   WATCH_MS while an alarm is running, so the alarm is never cut off by the
+   watch ending. */
+const unsigned long WATCH_MS         = 30000;
+const unsigned long ALARM_MS         = 30000;
+/* A slot other than the primary has to stay moved this long before it is an
+   ALERT. A hand reaching past a neighbouring slot for the tool behind it trips
+   that slot for a few hundred ms; a tool taken stays gone. */
+const unsigned long ALERT_HOLD_MS    = 1500;
+const unsigned int  ALARM_TICK_MS    = 150;    // alarm cadence: 150ms on, 150ms off
 
 /* ---- Cabinet lookup ------------------------------------------------------- */
 int8_t cabIndex(uint8_t cabNumber) {
@@ -238,6 +274,43 @@ void beep(int ms, int times = 1) {
 #endif
 }
 
+/* ---- Alarm (NON-blocking) --------------------------------------------------
+   A continuous on/off buzz that runs while the sensing loops keep going, so a
+   student who takes a second tool hears it at once AND the sensor can still see
+   the tool go back. alarmService() must be called from every loop that wants
+   the buzzer to keep ticking (the open window, the post-close watch, loop()).
+   The timer runs on controller 2 as well (its watch phase uses it to decide
+   when to give up) — only the pin write needs a buzzer.
+   `own` marks an alarm this board raised from its own sensors, which the
+   sensors may also silence (every extra slot back = quiet). An alarm the PC
+   asked for with ALARM,<s> is not ours to stop early. */
+unsigned long alarmUntil = 0;      // millis() the alarm ends; 0 = off
+bool          alarmOwn   = false;
+
+void alarmStop() {
+  alarmUntil = 0; alarmOwn = false;
+#if HAS_BUZZER
+  digitalWrite(BUZZER_PIN, LOW);
+#endif
+}
+
+void alarmStart(unsigned long ms, bool own) {
+  if (ms == 0) { if (!alarmOwn) alarmStop(); return; }   // ALARM,0 never silences our own sensors
+  alarmUntil = millis() + ms;
+  if (alarmUntil == 0) alarmUntil = 1;         // 0 means "off"
+  alarmOwn = own;
+}
+
+bool alarmRunning() { return alarmUntil != 0; }
+
+void alarmService() {
+  if (!alarmUntil) return;
+  if ((long) (millis() - alarmUntil) >= 0) { alarmStop(); return; }
+#if HAS_BUZZER
+  digitalWrite(BUZZER_PIN, ((millis() / ALARM_TICK_MS) & 1) ? HIGH : LOW);
+#endif
+}
+
 /* ---- Per-slot ultrasonic -------------------------------------------------- */
 float pingCm(const Slot &s) {
   if (!s.trig || !s.echo) return -1;
@@ -256,7 +329,9 @@ void sampleSlot(const Cabinet &c, uint8_t s, SlotState *st) {
   bool hasBase = st[s].baseCm >= 0;
   if (d < 0) {
     if (st[s].miss < 255) st[s].miss++;
-    if (hasBase && st[s].miss >= MISS_LIMIT) st[s].changed = true;
+    if (hasBase && st[s].miss >= MISS_LIMIT && !st[s].changed) {
+      st[s].changed = true; st[s].since = millis(); st[s].agree = 0;
+    }
     if (slotDebug) {
       Serial.print(F("#slot,")); Serial.print(c.number); Serial.print(','); Serial.print(s + 1);
       Serial.print(F(",none,miss=")); Serial.print(st[s].miss);
@@ -269,9 +344,17 @@ void sampleSlot(const Cabinet &c, uint8_t s, SlotState *st) {
 
   float delta = hasBase ? d - st[s].baseCm : 0;
   if (hasBase) {
-    if (fabs(delta) >= CHANGE_CM) {
+    /* Hysteresis: trip at CHANGE_CM away from the baseline, clear only once
+       back within half that. A reading parked in between holds its state, so
+       a tool sitting near the edge of the beam cannot flap ALERT/CLEAR. */
+    float mag  = fabs(delta);
+    bool  vote = st[s].changed ? (mag <= CHANGE_CM * 0.5) : (mag >= CHANGE_CM);
+    if (vote) {
       if (st[s].agree < AGREE_N) st[s].agree++;
-      if (st[s].agree >= AGREE_N) st[s].changed = true;
+      if (st[s].agree >= AGREE_N) {
+        st[s].changed = !st[s].changed; st[s].agree = 0;
+        if (st[s].changed) st[s].since = millis();
+      }
     } else {
       st[s].agree = 0;
     }
@@ -291,7 +374,8 @@ const uint8_t BASE_PASSES = 3;
 void baselineSweep(const Cabinet &c, SlotState *st) {
   float sum[MAX_SLOTS]; uint8_t n[MAX_SLOTS];
   for (uint8_t s = 0; s < c.slots; s++) {
-    st[s].baseCm = -1; st[s].lastCm = -1; st[s].agree = 0; st[s].miss = 0; st[s].changed = false;
+    st[s].baseCm = -1; st[s].lastCm = -1; st[s].agree = 0; st[s].miss = 0;
+    st[s].changed = false; st[s].alerted = false; st[s].since = 0;
     sum[s] = 0; n[s] = 0;
   }
   for (uint8_t pass = 0; pass < BASE_PASSES; pass++) {
@@ -304,6 +388,76 @@ void baselineSweep(const Cabinet &c, SlotState *st) {
   for (uint8_t s = 0; s < c.slots; s++) {
     if (n[s]) { st[s].baseCm = sum[s] / n[s]; st[s].lastCm = st[s].baseCm; st[s].miss = 0; }
   }
+}
+
+/* Every slot that is `changed` and is NOT the one this window is about
+   (`primary`, -1 = none) and has stayed that way for ALERT_HOLD_MS is a tool
+   leaving without a tag. Report each once (ALERT), sound the alarm, and report
+   it again once it is back (CLEAR). A slot that becomes the primary is no
+   longer an extra, so its ALERT is cleared. Returns how many extra slots are
+   out right now. Call after every sample. */
+uint8_t reportExtras(const Cabinet &c, SlotState *st, int8_t primary) {
+  uint8_t extras = 0;
+  for (uint8_t s = 0; s < c.slots; s++) {
+    bool extra = st[s].changed && (int8_t) s != primary
+                 && (st[s].alerted || millis() - st[s].since >= ALERT_HOLD_MS);
+    if (extra) extras++;
+    if (extra && !st[s].alerted) {
+      st[s].alerted = true;
+      Serial.print(F("ALERT,")); Serial.print(c.number); Serial.print(','); Serial.println(s + 1);
+      alarmStart(ALARM_MS, true);
+    } else if (!extra && st[s].alerted) {
+      st[s].alerted = false;
+      Serial.print(F("CLEAR,")); Serial.print(c.number); Serial.print(','); Serial.println(s + 1);
+    }
+  }
+  if (!extras && alarmOwn) alarmStop();        // everything back: quiet
+  return extras;
+}
+
+/* A line the post-close watch read but could not act on (an OPEN, say). It is
+   handed to handleSerial() on the next loop() pass instead of being lost. */
+char deferredLine[40];
+bool haveDeferred = false;
+
+/* Blocking watch after the door has relocked. The solenoid is locked but the
+   door is open until the student shuts it, so keep sampling this cabinet's
+   slots: a slot other than `primary` (the one just reported; -1 after a
+   TIMEOUT/ABORT, when every change is unaccounted for) moving is an ALERT.
+   Runs WATCH_MS, or until the alarm an ALERT started has run out — whichever
+   is later — and ends at once if the PC sends anything, so the next OPEN is
+   never delayed behind it. */
+void watchAfterClose(const Cabinet &c, SlotState *st, int8_t primary) {
+  unsigned long start = millis(), lastPing = 0;
+  uint8_t nextSlot = 0;
+  char cmd[40];
+  uint8_t extras = reportExtras(c, st, primary);   // pick up anything already out
+  Serial.print(F("#watch,")); Serial.print(c.number); Serial.print(F(",start,extras="));
+  Serial.println(extras);
+
+  for (;;) {
+    alarmService();
+    bool timeUp = millis() - start >= WATCH_MS;
+    if (timeUp && !alarmRunning()) break;
+    if (millis() - lastPing >= SENSOR_SETTLE_MS) {
+      lastPing = millis();
+      sampleSlot(c, nextSlot, st);
+      nextSlot = (nextSlot + 1) % c.slots;
+      extras = reportExtras(c, st, primary);
+    }
+    if (readLine(cmd, sizeof(cmd))) {
+      if (strcmp(cmd, "ABORT") == 0) continue;   // nothing is open; harmless
+      strncpy(deferredLine, cmd, sizeof(deferredLine) - 1);
+      deferredLine[sizeof(deferredLine) - 1] = '\0';
+      haveDeferred = true;
+      break;
+    }
+    delay(3);
+  }
+  Serial.print(F("#watch,")); Serial.print(c.number); Serial.print(F(",end,extras="));
+  Serial.println(extras);
+  /* An alarm still running here belongs to a tool that is still out. Let it
+     finish in loop() rather than cutting it off with the watch. */
 }
 
 /* ---- RFID ----------------------------------------------------------------- */
@@ -524,6 +678,15 @@ void handleOpen(uint8_t cabNum, const char *mode) {
     bool anyAlive = false;
     for (uint8_t s = 0; s < c.slots; s++) if (st[s].baseCm >= 0) anyAlive = true;
     if (!anyAlive) {
+#if !HAS_RFID
+      /* No reader on this board either, so nothing at all could confirm a
+         pickup: the loop below would DONE the instant the door opened and
+         relock it in the student's face. Refuse instead, and say why — the
+         bridge cancels the command and the kiosk tells the student. */
+      Serial.print(F("FAULT,")); Serial.print(cabNum); Serial.println(F(",nosensor"));
+      beep(50, 3);
+      return;
+#endif
       haveSensors = false;
       Serial.print(F("#cab ")); Serial.print(cabNum);
       Serial.println(F(": no sensor echo - confirming on tag only"));
@@ -551,15 +714,19 @@ void handleOpen(uint8_t cabNum, const char *mode) {
   unsigned long start = millis(), lastPing = 0;
   char tag[32]; tag[0] = '\0';
   bool haveTag = false;
-  int8_t changedSlot = -1;
+  int8_t changedSlot = -1;     // the slot this window is about (first to move, still moved)
   uint8_t nextSlot = 0;
   char cmd[40];
+  bool done = false;           // DONE was reported (else TIMEOUT: timed out or ABORT)
+  bool reported = false;       // DONE or TIMEOUT already went out (ABORT reports inside the loop)
 
 #if !HAS_RFID
   haveTag = true;      // no reader on this board; the bridge supplies the UID
 #endif
 
   while (millis() - start < OPEN_TIMEOUT_MS) {
+    alarmService();
+
     /* 1) RFID every pass. A no-card pass costs one library timeout (~25ms), so
           this loop runs at roughly 30ms/pass and the reader is polled ~30x/s —
           an RC522 polled slowly misses a tag that is tapped and lifted in under
@@ -578,25 +745,39 @@ void handleOpen(uint8_t cabNum, const char *mode) {
     }
 #endif
 
-    /* 2) ONE sensor per settle interval, round-robin. Borrow and return are
-          the same test — the slot's distance moved away from its baseline —
-          so `mode` is not consulted here; a returned tool moves the reading
-          just as a lifted one does. */
-    if (haveSensors && changedSlot < 0 && millis() - lastPing >= SENSOR_SETTLE_MS) {
+    /* 2) ONE sensor per settle interval, round-robin — and it keeps going
+          after the first slot moves. Sampling used to stop at the first
+          change, which is exactly how a second tool taken alongside the tagged
+          one went unnoticed. Borrow and return are the same test (the slot's
+          distance moved away from its baseline), so `mode` is not consulted;
+          a returned tool moves the reading just as a lifted one does. */
+    if (haveSensors && millis() - lastPing >= SENSOR_SETTLE_MS) {
       lastPing = millis();
       sampleSlot(c, nextSlot, st);
       nextSlot = (nextSlot + 1) % c.slots;
-      for (uint8_t s = 0; s < c.slots; s++) {
-        if (st[s].changed) {
-          changedSlot = s;
-          /* Informational, for the kiosk's step rail ("lift the tool" done). */
-          Serial.print(F("MOVED,")); Serial.print(cabNum); Serial.print(','); Serial.println(s + 1);
-          break;
+      /* The primary slot is the first one that moved. If it goes back before
+         the tag is read (wrong tool, put back) it stops being the primary and
+         the next moved slot takes over — so a lift-return-lift-another
+         sequence ends with the right slot on the DONE line. */
+      if (changedSlot >= 0 && !st[changedSlot].changed) changedSlot = -1;
+      if (changedSlot < 0) {
+        for (uint8_t s = 0; s < c.slots; s++) {
+          if (st[s].changed) {
+            changedSlot = s;
+            /* Informational, for the kiosk's step rail ("lift the tool" done). */
+            Serial.print(F("MOVED,")); Serial.print(cabNum); Serial.print(','); Serial.println(s + 1);
+            break;
+          }
         }
       }
+      /* Every OTHER moved slot is a tool leaving without a tag: ALERT + alarm. */
+      reportExtras(c, st, changedSlot);
     }
 
-    /* 3) Confirm once we have the tag AND a sensor change (or no sensors yet). */
+    /* 3) Confirm once we have the tag AND a sensor change (or no sensors yet).
+          An ALERT still out does not hold this up: recording the tagged tool
+          and flagging the other is better than a TIMEOUT that records
+          neither. The alarm carries on through the watch below. */
     if (haveTag && (changedSlot >= 0 || !haveSensors)) {
       /* Report BEFORE beeping. beep() blocks (~240ms here), and every one of
          those milliseconds is dead time before the server can record the
@@ -607,7 +788,8 @@ void handleOpen(uint8_t cabNum, const char *mode) {
       Serial.print(',');         Serial.print(tag);
       Serial.print(',');         Serial.println(changedSlot + 1);   // 1-based, 0 = unknown
       beep(80, 2);
-      return;
+      done = true; reported = true;
+      break;
     }
 
     /* 4) The kiosk's Cancel button reaches us as ABORT — relock immediately
@@ -617,9 +799,11 @@ void handleOpen(uint8_t cabNum, const char *mode) {
         lockCabinet(ci);
         Serial.print(F("TIMEOUT,")); Serial.println(cabNum);   // report first
         beep(400);
-        return;
+        reported = true;
+        break;
       }
       if (strcmp(cmd, "WHO") == 0) announce();
+      if (strncmp(cmd, "ALARM,", 6) == 0) alarmStart(atol(cmd + 6) * 1000UL, false);
       /* Stand in for a physical scan so the rest of the chain can be tested. */
       if (ALLOW_SIMTAG && !haveTag && strncmp(cmd, "SIMTAG,", 7) == 0) {
         strncpy(tag, cmd + 7, sizeof(tag) - 1);
@@ -632,15 +816,28 @@ void handleOpen(uint8_t cabNum, const char *mode) {
     delay(3);
   }
 
-  lockCabinet(ci);
-  Serial.print(F("TIMEOUT,")); Serial.println(cabNum);   // report first
-  beep(400);
+  if (!reported) {                                   // the window ran out
+    lockCabinet(ci);
+    Serial.print(F("TIMEOUT,")); Serial.println(cabNum);   // report first
+    beep(400);
+  }
+
+  /* 5) Door relocked, but not necessarily shut. Keep watching the slots.
+        After a DONE the reported slot is accounted for; after a TIMEOUT or
+        ABORT nothing is, so any slot that moved is a tool out with no record. */
+  if (haveSensors) watchAfterClose(c, st, done ? changedSlot : -1);
 }
 
 /* ---- Serial command parsing ---------------------------------------------- */
 void handleSerial() {
   char line[40];
-  if (!readLine(line, sizeof(line))) return;
+  if (haveDeferred) {                 // a line the post-close watch stepped aside for
+    haveDeferred = false;
+    strncpy(line, deferredLine, sizeof(line) - 1);
+    line[sizeof(line) - 1] = '\0';
+  } else if (!readLine(line, sizeof(line))) {
+    return;
+  }
 
   if (strncmp(line, "OPEN,", 5) == 0) {
     char *p = line + 5;
@@ -827,6 +1024,13 @@ void handleSerial() {
     Serial.print(F("#slotdbg=")); Serial.println(slotDebug ? 1 : 0);
     return;
   }
+  /* ALARM,<seconds> — sound the alarm (0 = stop). Controller 2 has no buzzer,
+     so the bridge relays its ALERT/CLEAR lines here as ALARM,30 / ALARM,0. */
+  if (strncmp(line, "ALARM,", 6) == 0) {
+    alarmStart(atol(line + 6) * 1000UL, false);
+    Serial.print(F("#alarm=")); Serial.println(alarmRunning() ? 1 : 0);
+    return;
+  }
 #if HAS_RFID
   if (strncmp(line, "IDLESCAN,", 9) == 0) {
     idleScanEnabled = (atoi(line + 9) != 0);
@@ -894,6 +1098,7 @@ void setup() {
 }
 
 void loop() {
+  alarmService();                   // keeps an alarm ticking between windows
   handleSerial();
 
 #if HAS_RFID

@@ -1,7 +1,7 @@
 # reginsite — Session Handoff / Project Notes
 
 > Living doc so any agent/session can pick up where we left off. **Update this when you change things.**
-> Last updated: 2026-09-18 (session 7: **post-917 review — Cancel→ABORT, reader hardening, progress rail, rule change**)
+> Last updated: 2026-09-21 (session 9: **public admin via Tailscale Funnel — `GO-LIVE-ADMIN.md`**; session 8: two-controller bridge review, second-tool ALERT + alarm, relative slot detection)
 
 ## ⚠ Hardware facts corrected this session (earlier notes were wrong)
 - **The touchscreen is 1024×600, not 800×480.** 7″ IPS, 5-point capacitive, **HDMI + USB touch,
@@ -14,7 +14,114 @@
   the ID **QR-face-down over the window**; they do not aim it at the monitor. Any terminal copy that
   tells them to "hold your ID up to the screen" or points in a fixed direction is wrong.
 
-## Session 7 — review of the Aug 22 + Sep 17 commits, done away from the hardware (current)
+## Session 9 — publishing the admin site, kiosk stays local (current)
+
+User's ask: the admin side (logs, dashboard) reachable from the internet; the kiosk NOT. Chosen
+design, after ruling out "upload everything to a host" (kiosk would need internet to open a door)
+and a read-only mirror (a sync job + second DB): **the mini PC stays the only server; a tunnel
+publishes a second, restricted listener.** Step-by-step for the mini PC is **`GO-LIVE-ADMIN.md`**
+(root). What is in the repo for it:
+- **`ADMIN_PUBLIC_PORT`** (`.env`, `config('services.admin_public_port')`): Laravel is started
+  twice — `:8000` kiosk + bridge as before, `:8001` for the tunnel. Global middleware
+  `PublicListenerGuard` answers **404** on the public port for `api/esp32/*`, `terminal.html`,
+  `assets/js/terminal.js`, `assets/css/terminal.css` (the device key ships in terminal.js).
+  Decided by `SERVER_PORT` (the bound port — a Host header cannot spoof it under `php -S`) or
+  `ADMIN_PUBLIC_LISTENER` (Apache `SetEnv`, where SERVER_PORT *is* Host-derived). Unset → no-op.
+- **`laravel/server.php`** (new; `artisan serve` prefers it over the framework copy): on the
+  public port the three kiosk files are not handed out as static files — they fall through to
+  Laravel and the guard. Matches by `realpath` because Windows serves `/Terminal.html`,
+  `/./terminal.html`, `/terminal.html.`, `/assets\js\terminal.js` as the same file. It also
+  normalises `SCRIPT_*` to `index.php` for every request that reaches Laravel (the built-in
+  server otherwise makes Laravel read `/terminal.html/` as `/`).
+- `TrustProxies` trusts `127.0.0.1` (Funnel *overwrites* `X-Forwarded-For` with the visitor —
+  checked in tailscale's `serve.go`), login route `throttle:10,1`, seeder password =
+  `ADMIN_PASSWORD` (default `admin`), new **`php artisan admin:password`** (no reseed needed;
+  refuses empty/`admin`). `.env.example` documents the three vars.
+- **`start-station.bat`** (root): both listeners + bridge in minimised windows; Edge kiosk line
+  commented. `.gitattributes` pins `*.bat` to CRLF — cmd.exe parsed the LF version as `'m' is not
+  recognized`.
+- Verified here with two `artisan serve`s + curl: 15 kiosk-path spellings and the esp32 routes
+  404 on 8001 (JSON `public_only` for the API), admin pages/login/bootstrap 200 on 8001, throttle
+  trips at the 10th try, nothing changed on 8000; `admin:password` + reseed-from-`.env` tested;
+  the .bat brings up all three windows. **Not done here:** the Tailscale steps themselves (need
+  the mini PC + an account) — commands come from the current Funnel CLI reference (v1.52+ syntax).
+- Dev-machine `.env` now has `ADMIN_PUBLIC_PORT=8001` (harmless; 8001 is only up when started).
+  DB reseeded clean, servers stopped.
+
+## Session 8 — review of `265cec7` (Sep 20) + the "took two pliers" problem
+
+**What `265cec7` (user, Sep 20, away from this doc) did — read this before the firmware:**
+- **Two-controller bridge.** `config.ini` `serial_ports = COM5, COM9` (old `serial_port` still
+  accepted). ONE `bridge.py` owns both ports; each `Board` learns its identity from the Mega's own
+  banner (`controller=N cabinets=lo-hi rfid=0/1 bench=0/1` + `READY,N`), never from config, so a
+  swapped USB socket cannot mis-route a door. `WHO` is sent 2 s after the port opens. OPEN/ABORT go
+  to the board whose range covers the locker; a missing board → the live one answers `NOWIRE` →
+  cancelled. Log lines are `[mega1]`/`[mega2]` once announced, `[COM5]` before.
+- **Tag pairing for controller 2** (no RC522 there): its `DONE,<cab>,,<slot>` has an empty uid and
+  is held in `pending_tag`; the bridge turns controller 1's idle scan on (`IDLESCAN,1`), waits up
+  to `TAG_WAIT_S` (45 s) for a `SCAN,<uid>` from it (tap-then-lift is parked in `scanned`),
+  confirms with that uid, then puts the idle scan back to the board's `bench` default. Single-flight
+  now also gates on `pending_tag`.
+- **Relative slot detection** replaced the absolute `emptyCm ± margin` thresholds (they needed every
+  shelf calibrated to the cm and judged Locker 1 empty before the door opened). Baseline = mean of 3
+  pings just before the door opens; a slot is "moved" once it differs from that by `CHANGE_CM`
+  (2.0) for `AGREE_N` (2) samples, either direction (so `mode` is not consulted); 3 misses after a
+  good baseline also count. `emptyCm` in the tables is reference only now. `#baseline,<cab>,<cm|none>…`
+  and `#slot,<cab>,<slot>,<cm>,d=±<delta>,changed=0/1` in the log.
+- Multimeter → **Meter Tape** (cab 5) everywhere; kiosk "Bench IDs" chips removed (sign-in must go
+  through the reader or a keyed-in number). Test suite grew to 11 scenarios.
+
+**The Plier 1 + Plier 2 test (user, Sep 21): a code problem, not the sensor.** Two lines in the
+sketch guaranteed the second tool was invisible even with a perfect sensor: step 2 of the window
+loop was gated on `changedSlot < 0` — sampling *stopped* the moment one slot moved — and DONE
+`return`ed from `handleOpen()`, so nothing sampled after the relock either (the solenoid locks but
+the door is still open until the student shuts it). There was also no protocol line for "another
+slot moved". Built this session, end to end:
+- **Firmware:** `changed` is a live state with hysteresis (trip at `CHANGE_CM`, clear within half of
+  it), sampling never stops inside the window, the *primary* slot is the first to move and still
+  moved (put back → the next moved slot takes over), and every other moved slot that stays moved for
+  `ALERT_HOLD_MS` (1.5 s, a hand reaching past a neighbour) is `ALERT,<cab>,<slot>` + a
+  **non-blocking alarm** (`alarmService()`, 150 ms on/off, `ALARM_MS` 30 s, re-armed per new alert,
+  silenced early when every extra slot is back → `CLEAR,<cab>,<slot>`). DONE is **not** withheld by
+  an alert (record the tagged tool, flag the other — better than a TIMEOUT that records neither).
+  After DONE/TIMEOUT/ABORT, `watchAfterClose()` keeps sampling for `WATCH_MS` (30 s, longer while
+  the alarm runs; after a TIMEOUT/ABORT *every* moved slot is an alert); it ends at once if the PC
+  sends anything — that line is parked in `deferredLine` for `handleSerial()`, so an OPEN is never
+  delayed behind it. `ALARM,<s>` PC→Mega command (`ALARM,0` never silences the board's own alarm).
+  `FAULT,<cab>,nosensor`: a reader-less cabinet with no sensor echo now refuses to open (it used to
+  DONE and relock ~120 ms after OPENED). Header protocol table updated. **Not compiled here** —
+  brace/`#if` balance checked by script; compile on the mini PC.
+- **Bridge:** `ALERT`/`CLEAR` → `POST locker-alert {locker_id, slot, cleared}` via the same
+  retry queue as confirms (now `[path, payload, label, first]`); a controller-2 alert is relayed to
+  controller 1 as `ALARM,30` / `ALARM,0` (it has the only buzzer). `FAULT` → confirm reason `fault`.
+  `idle_state` resets when the reader board is gone (a DTR reset put its idle scan back to the bench
+  default and the bridge never re-sent `IDLESCAN,1`). 13 scenarios pass (L: second tool on
+  controller 1; M: controller-2 alert → ALARM relay + FAULT).
+- **Server:** migration `2026_09_21_000004_add_alert_to_lockers` (`alert_slots`, `alert`,
+  `alert_at`); `POST esp32/locker-alert` keeps the set of slots out and writes the human line
+  ("Slot 2 moved without a tag scan — a tool may be out unrecorded · <student> (<no>) was at the
+  door", from the locker's latest command); `command-status` now returns `alert`; `bootstrap`
+  lockers carry `alert`/`alertSlots`/`alertAt`; `POST lockers {clearAlert:true}` clears it (staff).
+  Confirm reason `fault` → "That locker's slot sensors are not responding — please ask staff".
+- **Admin:** dashboard locker card goes red "UNTAGGED REMOVAL" with the line + rel-time, alerts panel
+  gets "Untagged removals" (counts into "flagged"), inventory row shows the line, the locker edit
+  modal has a "Clear this alert" checkbox. **Kiosk:** the await screen and the receipt show a red
+  hazard strip "Only one tool per borrow — put the other tool back in its slot" while `alert` is
+  set (the receipt keeps polling `command-status` for its 10 s). All four screenshotted via the
+  Edge harness; server path exercised with curl against `artisan serve`.
+- Also from the review of `265cec7`: `terminal.html` `<symbol id="i-check"viewBox=` missing space
+  fixed; README scenario counts were stale.
+
+**Hardware day (adds to the session-7 list):**
+7. Borrow, lift Plier 1, tag it, *also* take Plier 2 → within ~2 s: `ALERT,1,2` in the log, buzzer
+   alarm, kiosk strip, dashboard card red naming the student. Put Plier 2 back → `CLEAR,1,2`, alarm
+   stops, strip gone. Walk away with it → alarm runs 30 s, the alert stays until staff clear it.
+8. Open, lift a tool, never tag → after `TIMEOUT` the watch phase reports it as `ALERT` too.
+9. Reach past slot A to take the tool in slot B → no ALERT (1.5 s hold-off). If it does alert,
+   raise `ALERT_HOLD_MS`; if a real second tool never alerts, watch `d=` in `#slot`.
+10. Next OPEN right after a DONE → `#watch,<cab>,end` then `OPENED` at once (watch steps aside).
+
+## Session 7 — review of the Aug 22 + Sep 17 commits, done away from the hardware
 
 Neither of the two commits after session 6 was written up, so first what they did:
 - **`518f0e0` (Aug 22)** — bridge got a local queue + single-flight dispatch; kiosk poll 2s → 600ms;

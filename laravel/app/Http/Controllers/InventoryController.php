@@ -49,6 +49,7 @@ class InventoryController extends Controller
             'sensor' => 'in:online,offline',
             'occupancy' => 'in:present,removed',
             'led' => 'in:green,red,off',
+            'clearAlert' => 'nullable|boolean',
         ]);
 
         $attrs = [
@@ -58,6 +59,10 @@ class InventoryController extends Controller
             'occupancy' => $data['occupancy'] ?? 'present',
             'led' => $data['led'] ?? 'off',
         ];
+        if (!empty($data['clearAlert'])) {
+            // Staff have accounted for the tool the sensors flagged.
+            $attrs += ['alert_slots' => null, 'alert' => null, 'alert_at' => null];
+        }
         if (!empty($data['id'])) {
             $locker = tap(Locker::findOrFail((int) $data['id']))->update($attrs);
         } else {

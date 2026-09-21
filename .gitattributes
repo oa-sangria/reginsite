@@ -1,0 +1,2 @@
+# cmd.exe misparses LF-only batch files (rem -> m); keep CRLF on every checkout
+*.bat text eol=crlf

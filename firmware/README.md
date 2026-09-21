@@ -18,7 +18,7 @@ firmware/
   rfid_read_test/rfid_read_test.ino         Standalone: prints tag UIDs (for enrolling tools)
   bridge/bridge.py                           mini-PC bridge (console; the only bridge)
   bridge/config.ini                          serial_ports (one per Mega), base_url, api_key
-  bridge/test_bridge.py                      eight-scenario fake-serial test of the bridge (no hardware)
+  bridge/test_bridge.py                      thirteen-scenario fake-serial test of the bridge (no hardware)
   tests/rfid_usb_capture.html                what a USB keyboard-wedge RFID reader types
 ```
 
@@ -139,19 +139,40 @@ The bridge console is the one place the whole chain is visible. A healthy borrow
 
 ```
   queued cmd 41 (locker 1, borrow)            <- kiosk tapped BORROW; server queued it
-  <- OPEN locker 1 (borrow) [cmd 41]           <- bridge told the Mega
-[mega] #rc522 reinit (open) v=0x92             <- reader re-initialised for this window; 0x92 = alive
-[mega] #baseline,1,none,none,10.4,12.3         <- what each slot read before the door opened (none = no echo)
-[mega] OPENED,1                                <- door unlocked; kiosk step 01 ticks
-[mega] #slot,1,3,10.5,d=+0.1,changed=0         <- sensor samples (slotDebug) — cm, delta from baseline, tripped?
-[mega] MOVED,1,2                               <- slot B saw the tool leave; kiosk step 02 ticks, step 03 spins
-[mega] SCAN,E5 77 7B 06                        <- tag read (Mega beeps once); kiosk step 03 ticks
-[mega] DONE,1,E5 77 7B 06,2                    <- both halves met; door relocked, double beep
+  <- OPEN locker 1 (borrow) [cmd 41] -> mega1  <- bridge told the Mega that owns cabinet 1
+[mega1] #rc522 reinit (open) v=0x92            <- reader re-initialised for this window; 0x92 = alive
+[mega1] #baseline,1,none,none,10.4,12.3        <- what each slot read before the door opened (none = no echo)
+[mega1] OPENED,1                               <- door unlocked; kiosk step 01 ticks
+[mega1] #slot,1,3,10.5,d=+0.1,changed=0        <- sensor samples (slotDebug) — cm, delta from baseline, moved?
+[mega1] MOVED,1,2                              <- slot B saw the tool leave; kiosk step 02 ticks, step 03 spins
+[mega1] SCAN,E5 77 7B 06                       <- tag read (Mega beeps once); kiosk step 03 ticks
+[mega1] DONE,1,E5 77 7B 06,2                   <- both halves met; door relocked, double beep
   -> BORROW saved: Pliers 1 (tx #12)           <- server wrote the row; kiosk shows the receipt
+[mega1] #watch,1,start,extras=0                <- door locked but not shut: slots still watched for 30 s
+[mega1] #watch,1,end,extras=0                  <- nothing else moved
 ```
 
+The same borrow when the student also takes a second tool:
+
+```
+[mega1] MOVED,1,2
+[mega1] ALERT,1,3                              <- slot C moved too and stayed moved (1.5 s): buzzer alarm starts
+  !! locker 1 slot 3: tool LEFT WITHOUT A TAG — alarm   <- server flags the locker; kiosk shows the red strip
+[mega1] SCAN,E5 77 7B 06
+[mega1] DONE,1,E5 77 7B 06,2                   <- the TAGGED tool is still recorded (better than nothing)
+  -> BORROW saved: Pliers 1 (tx #12)
+[mega1] #watch,1,start,extras=1
+[mega1] CLEAR,1,3                              <- slot C reads back at its baseline: alarm stops
+  !! locker 1 slot 3: tool back in place       <- flag cleared; strip gone
+[mega1] #watch,1,end,extras=0
+```
+
+Walk away with it instead and the alarm runs 30 s, the dashboard card stays red ("UNTAGGED
+REMOVAL · Slot 3 moved without a tag scan … <student> was at the door") until staff clear it from
+the locker's edit form, and `#watch,1,end,extras=1` closes the watch.
+
 Things that are *fine* even though they look odd:
-- `[mega] SCAN,...` with no window open — the idle scan (BENCH_MODE). Logged, not acted on.
+- `[mega1] SCAN,...` with no window open — the idle scan (BENCH_MODE). Logged, not acted on.
 - `-> confirm ignored: already timeout` — the student cancelled at the kiosk a moment before the
   Mega finished; nothing was recorded, which is correct.
 - `<- ABORT locker N: command N is already timeout on the server (Cancelled at the kiosk)` — the
@@ -174,9 +195,24 @@ A slot is not judged "full" or "empty" — the sketch has no idea what a tool or
 Instead, just before the door opens it pings every slot three times and averages the echoes into a
 **baseline** (`#baseline,<cab>,...`). During the window a slot counts as **moved** once its reading
 differs from that baseline by `CHANGE_CM` (2.0) for `AGREE_N` (2) consecutive samples, in either
-direction — lifting a tool and putting one back both trip it. A slot that had a baseline and then
-returns no echo for `MISS_LIMIT` (3) samples also counts as moved. Slots with no echo at baseline
-are ignored for that window; if *no* slot answers, the cabinet degrades to tag-only.
+direction — lifting a tool and putting one back both trip it — and counts as **back** once it has
+sat within `CHANGE_CM/2` of the baseline for `AGREE_N` samples (hysteresis, so a reading parked on
+the edge cannot flap). A slot that had a baseline and then returns no echo for `MISS_LIMIT` (3)
+samples also counts as moved. Slots with no echo at baseline are ignored for that window; if *no*
+slot answers, the cabinet degrades to tag-only (controller 1) or refuses with `FAULT` (controller 2,
+which has no tag to fall back on).
+
+**Every slot is sampled for the whole window and for `WATCH_MS` (30 s) after the relock** — the
+solenoid locks but the door is open until the student shuts it. The *primary* slot is the first to
+move (and still moved: put it back before tagging and the next moved slot takes over); it goes on
+the `MOVED` and `DONE` lines. Any **other** slot that stays moved for `ALERT_HOLD_MS` (1.5 s — a
+hand reaching past a neighbour trips it for less) is a tool leaving without a tag: `ALERT,<cab>,
+<slot>`, a non-blocking buzzer alarm for `ALARM_MS` (30 s, re-armed by each new alert), and the
+bridge/server/kiosk chain described under the sample log. `CLEAR,<cab>,<slot>` when it reads back
+at its baseline; the alarm stops early once every extra slot is back. After a `TIMEOUT`/`ABORT`
+there is no primary, so *any* moved slot in the watch is an alert (took a tool, never tagged). The
+watch ends the moment the PC sends another line (the line is handled right after), so a following
+OPEN is never delayed.
 
 The absolute-threshold scheme this replaced needed every shelf calibrated to the centimetre and, with
 the numbers slightly off, judged Locker 1's slots empty before the door opened — so a lift could
@@ -221,8 +257,12 @@ barely moves when the tool leaves, the sensor is not looking at the tool's body 
 | Mega→PC | `DONE,<cabinet>,<uid>,<slot>` | confirmed → bridge records it (slot 1..N, 0 = unknown) |
 | Mega→PC | `TIMEOUT,<cabinet>` | gave up, relocked |
 | Mega→PC | `NOWIRE,<cabinet>` | that cabinet belongs to the **other** controller |
+| Mega→PC | `ALERT,<cabinet>,<slot>` | a slot OTHER than the reported one moved — a tool left without a tag; buzzer alarming |
+| Mega→PC | `CLEAR,<cabinet>,<slot>` | that slot is back at its baseline |
+| Mega→PC | `FAULT,<cabinet>,<why>` | refused to open (reader-less cabinet with no sensor echo) → bridge cancels, reason `fault` |
 | Mega→PC | `ERR,<line>` | command not understood |
 | PC→Mega 1 | `IDLESCAN,<0\|1>` | idle tag reporting on/off — the bridge arms it while a controller-2 door is open (below) |
+| PC→Mega 1 | `ALARM,<seconds>` | sound the buzzer (0 = stop) — the bridge relays controller 2's ALERT/CLEAR here; never silences the board's own alarm |
 
 **Cabinets 6–10 have no reader.** Controller 2 sends `DONE,<cabinet>,,<slot>` with an *empty* uid
 as soon as the slot moves (door relocks then). The bridge holds that DONE, turns on controller 1's
@@ -262,7 +302,7 @@ On the mini PC (see also `../SETUP-FRESH-PC.md`):
 4. Run the bridge: `python firmware/bridge/bridge.py`. It is a daemon — it survives rejected tags,
    server restarts and serial glitches on its own (unexpected errors are logged and the loop
    continues; confirms the server could not be reached for are retried for 10 minutes).
-   After editing it, `python firmware/bridge/test_bridge.py` must still print `ALL SIX SCENARIOS PASS`.
+   After editing it, `python firmware/bridge/test_bridge.py` must still print `ALL THIRTEEN SCENARIOS PASS`.
 5. Upload `locker_controller.ino` (install the **MFRC522** library first; close Serial Monitor
    before running the bridge).
 6. On the touchscreen open `http://localhost:8000/terminal.html`, scan a student QR, pick a tool.
@@ -305,6 +345,10 @@ finalised — the tags themselves did not, they were only re-homed. See `Databas
   `ABORT` when the kiosk cancels), or `command-status` is failing — check its log.
 
 ## Going to production
+- Publishing the **admin site** to the internet while the kiosk stays on the mini PC: see
+  `GO-LIVE-ADMIN.md` in the repo root (second Laravel listener + Tailscale Funnel; the kiosk and
+  `/api/esp32` answer 404 on the public address). `start-station.bat` starts both listeners + this
+  bridge.
 - `#define BENCH_MODE 0` in `locker_controller.ino`, re-upload; the boot banner shows `bench=0`.
 - Delete the `inject.txt` hook in `bridge.py` (marked TEMPORARY).
 - Launch the kiosk with `?kiosk=1`; the browser fullscreen on the 1024×600 panel.

@@ -493,4 +493,105 @@ assert "no tag tapped within 0s; cancelled" in log, log
 assert [(m, p) for m, p, _ in h.calls].count(("POST", "confirm")) == 1
 assert _serials["COM5"].writes == ["WHO", "IDLESCAN,1", "IDLESCAN,0"], _serials["COM5"].writes
 
-print("\nALL ELEVEN SCENARIOS PASS")
+# ---------------------------------------------------------------------------
+# L — a second tool leaves: the Mega reports ALERT,<cab>,<slot> for the slot
+# that is NOT on the DONE line, keeps the borrow going, then CLEAR when it is
+# put back during the post-close watch. Each goes to the server as locker-alert.
+class ScenarioExtraTool:
+    def __init__(self): self.alerts = []
+    def on_api(self, h, path, payload):
+        if path == "commands":
+            if not h.commands_served:
+                h.commands_served = True
+                return {"ok": True, "commands": [{"id": 40, "type": "open", "lockerId": "1", "mode": "borrow"}]}
+            return {"ok": True, "commands": []}
+        if path == "command-status":
+            return {"ok": True, "status": "sent", "note": None}
+        if path == "command-progress":
+            return {"ok": True, "status": "sent", "note": payload["stage"]}
+        if path == "confirm":
+            assert payload == {"command_id": 40, "uid": "E5 77 7B 06", "slot": 1}, payload
+            # The tagged tool is recorded even though slot 2 is still out...
+            _serial.lines += ["#watch,1,start,extras=1", "CLEAR,1,2", "#watch,1,end,extras=0", "__END__"]
+            return {"ok": True, "action": "borrow", "tool": "Pliers 1",
+                    "result": {"txId": "41"}, "status": "done"}
+        if path == "locker-alert":
+            self.alerts.append(payload)
+            return {"ok": True}
+        raise AssertionError(path)
+    def on_write(self, h, line):
+        if line == "WHO":
+            h.writer.lines += [BANNER.format(id=1, lo=1, hi=5, rf=1), "READY,1"]
+        elif line.startswith("OPEN,"):
+            # Plier 1 (slot 1) lifted, then Plier 2 (slot 2) as well, then the tag.
+            h.writer.lines += ["OPENED,1", "MOVED,1,1", "ALERT,1,2", "SCAN,E5 77 7B 06", "DONE,1,E5 77 7B 06,1"]
+        assert line != "ABORT" and not line.startswith("ALARM,"), line   # mega1 has its own buzzer
+
+sc = ScenarioExtraTool()
+h, log = run("L: second tool taken -> ALERT relayed, borrow still saved, CLEAR when put back", sc)
+assert sc.alerts == [{"locker_id": 1, "slot": 2, "cleared": False},
+                     {"locker_id": 1, "slot": 2, "cleared": True}], sc.alerts
+assert "locker 1 slot 2: tool LEFT WITHOUT A TAG" in log and "back in place" in log, log
+assert "BORROW saved: Pliers 1 (tx #41)" in log, log
+
+# M — the same on controller 2, which has no buzzer: the bridge sounds
+# controller 1's (ALARM,30) and silences it on CLEAR (ALARM,0). Also FAULT:
+# a reader-less cabinet with no sensor echo refuses to open -> cancelled.
+class ScenarioRemoteAlarm:
+    def __init__(self): self.alerts = []; self.confirms = []
+    def on_api(self, h, path, payload):
+        if path == "commands":
+            if not h.commands_served:
+                h.commands_served = True
+                return {"ok": True, "commands": [
+                    {"id": 50, "type": "open", "lockerId": "7", "mode": "borrow"},
+                    {"id": 51, "type": "open", "lockerId": "9", "mode": "borrow"}]}
+            if len(self.confirms) == 2:
+                _serials["COM5"].lines.append("__END__")
+            return {"ok": True, "commands": []}
+        if path == "command-status":
+            return {"ok": True, "status": "sent", "note": None}
+        if path == "command-progress":
+            return {"ok": True, "status": "sent", "note": payload["stage"]}
+        if path == "confirm":
+            self.confirms.append(payload)
+            if payload.get("reason") == "fault":
+                return {"ok": True, "result": "cancelled (fault)", "status": "timeout"}
+            assert payload == {"command_id": 50, "uid": "1E 3C 78 06", "slot": 2}, payload
+            return {"ok": True, "action": "borrow", "tool": "Wire Stripper 1",
+                    "result": {"txId": "52"}, "status": "done"}
+        if path == "locker-alert":
+            self.alerts.append(payload)
+            return {"ok": True}
+        raise AssertionError(path)
+    def on_write(self, h, line):
+        if two_board_who(h, line): return
+        w = h.writer
+        if line == "OPEN,7,borrow":
+            w.lines += ["OPENED,7", "MOVED,7,2", "ALERT,7,3", "DONE,7,,2"]
+        elif line == "OPEN,9,borrow":
+            w.lines += ["FAULT,9,nosensor"]
+        elif line == "IDLESCAN,1":
+            w.lines += ["#idlescan=1", "SCAN,1E 3C 78 06"]
+        elif line == "ALARM,30":
+            # controller 1 acknowledges; meanwhile the tool goes back on controller 2
+            w.lines.append("#alarm=1")
+            _serials["COM8"].lines += ["CLEAR,7,3"]
+        elif line == "ALARM,0":
+            w.lines.append("#alarm=0")
+
+PORTS[:] = ["COM5", "COM8"]
+sc = ScenarioRemoteAlarm()
+h, log = run("M: controller-2 ALERT -> ALARM on controller 1; FAULT -> cancelled", sc)
+PORTS[:] = ["COM5"]
+assert sc.alerts == [{"locker_id": 7, "slot": 3, "cleared": False},
+                     {"locker_id": 7, "slot": 3, "cleared": True}], sc.alerts
+w1 = _serials["COM5"].writes
+assert w1[:2] == ["WHO", "IDLESCAN,1"] and "ALARM,30" in w1 and "ALARM,0" in w1, w1
+assert w1.index("ALARM,30") < w1.index("ALARM,0"), w1
+assert _serials["COM8"].writes == ["WHO", "OPEN,7,borrow", "OPEN,9,borrow"], _serials["COM8"].writes
+assert "BORROW saved: Wire Stripper 1 (tx #52)" in log, log
+assert "locker 9 refused to open on mega2 (nosensor); cancelled" in log, log
+assert {"command_id": 51, "timeout": True, "reason": "fault"} in sc.confirms, sc.confirms
+
+print("\nALL THIRTEEN SCENARIOS PASS")

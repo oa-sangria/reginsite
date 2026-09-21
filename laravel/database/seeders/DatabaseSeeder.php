@@ -30,7 +30,7 @@ class DatabaseSeeder extends Seeder
     {
         User::create([
             'username' => 'admin', 'name' => 'Administrator',
-            'password' => Hash::make('admin'),
+            'password' => Hash::make(config('services.admin_password')), // ADMIN_PASSWORD in .env
         ]);
 
         Setting::put('terms',

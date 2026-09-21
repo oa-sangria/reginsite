@@ -321,7 +321,8 @@ function _drawInv() {
     _el("invTable").innerHTML =
       '<table class="data"><thead><tr><th>Locker</th><th>Tool</th><th>Ultrasonic Sensor</th><th>Occupancy</th><th>LED</th><th></th></tr></thead><tbody>' +
       DB.lockers.map(function (l) {
-        return "<tr><td class='cell-strong'>" + _esc(l.number) + "</td>" +
+        return "<tr><td class='cell-strong'>" + _esc(l.number) +
+          (l.alert ? '<div class="cell-sub" style="color:var(--danger)">' + _esc(l.alert) + "</div>" : "") + "</td>" +
           "<td>" + _esc(App.toolName(l.toolId)) + "</td>" +
           "<td>" + App.statusBadge(l.sensor) + "</td>" +
           "<td>" + App.statusBadge(l.occupancy) + "</td>" +
@@ -391,6 +392,12 @@ function _lockerModal(id) {
         _field("Occupancy", '<select class="select" id="fOcc">' + opts(["present", "removed"], l ? l.occupancy : "present") + "</select>") +
       "</div>" +
       _field("LED indicator", '<select class="select" id="fLed">' + opts(["green", "red", "off"], l ? l.led : "green") + "</select>") +
+      (l && l.alert
+        ? '<div class="field"><label>Sensor alert</label>' +
+            '<div class="cell-sub" style="color:var(--danger);margin-bottom:6px">' + _esc(l.alert) + "</div>" +
+            '<label style="display:flex;align-items:center;gap:8px;font-weight:500;text-transform:none;letter-spacing:0">' +
+              '<input type="checkbox" id="fClearAlert" /> Clear this alert (the tool is accounted for)</label></div>'
+        : "") +
     "</div>" +
     '<div class="modal-foot"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
       '<button class="btn btn-primary" id="fSave">Save</button></div>');
@@ -399,7 +406,8 @@ function _lockerModal(id) {
     var num = _val("fNum"); if (!num) { _el("fNum").focus(); return; }
     _saveVia("lockers", {
       action: "save", id: l ? l.id : "",
-      number: num, toolId: _val("fTool"), sensor: _val("fSensor"), occupancy: _val("fOcc"), led: _val("fLed")
+      number: num, toolId: _val("fTool"), sensor: _val("fSensor"), occupancy: _val("fOcc"), led: _val("fLed"),
+      clearAlert: !!(_el("fClearAlert") && _el("fClearAlert").checked)
     }, _drawInv);
   });
 }

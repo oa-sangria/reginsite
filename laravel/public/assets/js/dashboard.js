@@ -35,7 +35,8 @@ function renderDashboard() {
   document.getElementById("lockerMap").innerHTML = DB.lockers.map(function (l) {
     var tool = App.toolById(l.toolId);
     var cls, state;
-    if (l.sensor === "offline")            { cls = "offline";     state = "Sensor Offline"; }
+    if (l.alert)                           { cls = "alert";       state = "Untagged Removal"; }
+    else if (l.sensor === "offline")       { cls = "offline";     state = "Sensor Offline"; }
     else if (tool && tool.status === "maintenance") { cls = "maintenance"; state = "Maintenance"; }
     else if (l.occupancy === "removed")    { cls = "removed";     state = "Tool Removed"; }
     else                                   { cls = "present";     state = "Tool Present"; }
@@ -46,6 +47,11 @@ function renderDashboard() {
       ? '<div class="locker-borrower">Borrowed by <b>' + App.escapeHtml(App.studentName(active.studentId)) +
           '</b> · ' + App.relTime(active.borrowTime) + "</div>"
       : "";
+    // The sensors' own report — who was at the door and when — outranks the loan line.
+    var alert = l.alert
+      ? '<div class="locker-alert">' + App.escapeHtml(l.alert) +
+          (l.alertAt ? ' <span class="muted">· ' + App.relTime(l.alertAt) + "</span>" : "") + "</div>"
+      : "";
 
     return '<div class="locker ' + cls + '">' +
         '<div class="locker-top"><span class="locker-no">' + App.escapeHtml(l.number) + "</span>" +
@@ -54,18 +60,19 @@ function renderDashboard() {
         '<div class="locker-state">' + state + "</div>" +
         '<div class="locker-meta"><span class="sensor-dot ' + l.sensor + '"></span> Ultrasonic ' + l.sensor +
           ' · LED ' + l.led + "</div>" +
-        borrower +
+        alert + borrower +
       "</div>";
   }).join("");
 
   /* ---- Alerts ------------------------------------------------------------ */
   var alerts = [];
+  alerts.push(alertRow("danger", st.untagged, "Untagged removals", "A slot emptied with no tag scan — check the locker", "inventory.html"));
   alerts.push(alertRow("danger", st.overdue, "Overdue tools", "Past the 8-hour borrow limit", "transactions.html"));
   alerts.push(alertRow("warn", st.banned, "Banned students", "Overdue ≥ 2 days · 2-day ban", "banned.html"));
   alerts.push(alertRow("muted", st.lockersOffline, "Lockers offline", "Ultrasonic sensor not reporting", "inventory.html"));
   alerts.push(alertRow("muted", st.maintenance, "Tools in maintenance", "Temporarily unavailable", "inventory.html"));
   document.getElementById("alerts").innerHTML = alerts.join("");
-  var attention = st.overdue + st.banned + st.lockersOffline + st.maintenance;
+  var attention = st.untagged + st.overdue + st.banned + st.lockersOffline + st.maintenance;
   document.getElementById("alertCount").textContent = attention + " flagged";
 
   /* ---- Recent activity --------------------------------------------------- */

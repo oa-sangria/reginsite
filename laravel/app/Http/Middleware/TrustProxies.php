@@ -10,9 +10,13 @@ class TrustProxies extends Middleware
     /**
      * The trusted proxies for this application.
      *
+     * The public tunnel agent (GO-LIVE-ADMIN.md) runs on this same machine and forwards
+     * to a local listener, so its X-Forwarded-* headers are honoured: the visitor's real
+     * IP reaches the login throttle and the log instead of 127.0.0.1.
+     *
      * @var array<int, string>|string|null
      */
-    protected $proxies;
+    protected $proxies = '127.0.0.1';
 
     /**
      * The headers that should be used to detect proxies.

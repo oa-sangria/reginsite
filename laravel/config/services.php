@@ -27,6 +27,11 @@ return [
 
     'device_key' => env('DEVICE_API_KEY', ''),
 
+    // GO-LIVE-ADMIN.md: port of the second `artisan serve` that the public tunnel points at
+    // (0/unset = no public listener); password the seeder gives the `admin` user.
+    'admin_public_port' => (int) env('ADMIN_PUBLIC_PORT', 0),
+    'admin_password' => env('ADMIN_PASSWORD', 'admin'),
+
     'ses' => [
         'key' => env('AWS_ACCESS_KEY_ID'),
         'secret' => env('AWS_SECRET_ACCESS_KEY'),

@@ -242,6 +242,9 @@ Each time you turn the PC on and want to use the system:
 
 To reset the demo data at any time: in the `laravel` folder run `php artisan migrate:fresh --seed`.
 
+Shortcut: **`start-station.bat`** in the project folder does steps 2–3 (and a second Laravel
+listener on port 8001 used only when the admin site is published — see **`GO-LIVE-ADMIN.md`**).
+
 ---
 
 ## 8. Troubleshooting

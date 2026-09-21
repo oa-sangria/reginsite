@@ -443,6 +443,24 @@
   }
 
   /* ---- 05 · Await the physical confirm (RFID via the bridge) ------------ */
+  /* The slot sensors keep watching every slot while the door is open and for
+     a while after it relocks. A second slot moving means a tool is leaving
+     with no tag — the Mega's buzzer alarms and the server flags the locker;
+     command-status carries that flag as `alert`, so the student is told to put
+     it back while the alarm is still sounding. Shown on the await screen and
+     the receipt (the second tool usually goes after the first is recorded). */
+  function extraWarn(borrowing) {
+    return '<div class="k-hazard k-hazard--stop" id="extraWarn" style="display:none;margin-top:12px">' +
+      ico("i-alert") + "<span>" +
+      (borrowing ? "Only one tool per borrow — <b>put the other tool back in its slot</b>."
+                 : "Another slot moved — <b>put that tool back in its slot</b>.") +
+      " The alarm stops once its slot reads full again.</span></div>";
+  }
+  function showExtraWarn(on) {
+    var w = el("extraWarn");
+    if (w) w.style.display = on ? "flex" : "none";
+  }
+
   function screenAwait(mode, cmd, tag) {
     disarmIdle();                        // a door is open — never time out here
     var borrowing = mode === "borrow";
@@ -479,6 +497,7 @@
             '<li data-n="03" id="railTag"><b>Tap its RFID tag on the reader</b>' +
               "<small>Records the exact tool — then the door locks</small></li>" +
           "</ol>" +
+          extraWarn(borrowing) +
           bench +
           '<div class="k-actions" style="margin-top:auto;padding-top:10px">' +
             '<button class="k-btn k-btn--ghost k-btn--sm" id="cancelBtn">' + ico("i-x") + "Cancel</button>" +
@@ -545,6 +564,7 @@
       if (settling) return;
       call("command-status", { command_id: cmd.commandId }).then(function (c) {
         if (!c.ok || settling) return;
+        showExtraWarn(!!c.alert);
 
         if (c.status === "pending" || c.status === "sent") {
           var stages = "," + (c.note || "") + ",";
@@ -609,7 +629,17 @@
           '<button class="k-btn k-btn--ghost" id="moreBtn">Back to menu</button>' +
           '<button class="k-btn k-btn--primary" id="doneBtn">' + ico("i-check") + "Done</button>" +
         "</div>" +
+        extraWarn(borrowing) +
       "</div>");
+    // The door is relocked but not shut: the Mega is still watching the slots.
+    // Keep asking about the locker so a second tool leaving now shows here.
+    if (cmd && cmd.commandId) {
+      pollTimer = setInterval(function () {
+        call("command-status", { command_id: cmd.commandId }).then(function (c) {
+          if (c.ok) showExtraWarn(!!c.alert);
+        })["catch"](function () {});
+      }, 600);
+    }
     on("doneBtn", screenIdle);
     on("moreBtn", function () {
       // Refresh eligibility/loans before showing the menu again.

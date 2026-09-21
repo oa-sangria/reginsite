@@ -188,6 +188,7 @@ class Esp32Controller extends Controller
                 'nowire'    => 'That locker is not connected to this controller',
                 'stale'     => 'The controller stopped responding',
                 'cancelled' => 'Cancelled at the kiosk',
+                'fault'     => 'That locker\'s slot sensors are not responding — please ask staff',
             ];
             $cmd->update(['status' => 'timeout', 'note' => $notes[$reason] ?? $reason]);
             return response()->json(['ok' => true, 'result' => 'cancelled (' . $reason . ')', 'status' => 'timeout']);
@@ -269,13 +270,57 @@ class Esp32Controller extends Controller
             throw new HttpException(404, 'Unknown command');
         }
         $tool = $cmd->tool_id ? Tool::find($cmd->tool_id) : null;
+        $locker = Locker::find($cmd->locker_id);
         return response()->json([
             'ok' => true,
             'status' => $cmd->status,
             'note' => $cmd->note,
             'tool' => $tool ? $tool->name : null,
             'txId' => $cmd->transaction_id ? (string) $cmd->transaction_id : null,
+            // The locker's untagged-removal flag rides along so the kiosk can
+            // tell the student to put the other tool back while the buzzer
+            // is still going — during the window and on the receipt after.
+            'alert' => $locker ? $locker->alert : null,
         ]);
+    }
+
+    // 4c) Bridge relays ALERT / CLEAR from the Mega: a slot OTHER than the one on
+    //     the DONE line moved, so a tool left (or was put in) with no tag scan.
+    //     Keep the set of slots that are out on the locker, with a human line
+    //     naming whoever was at the door, until each one reads back at its
+    //     baseline (CLEAR) or staff clear it from the locker form. --------- //
+    public function lockerAlert(Request $request)
+    {
+        $locker = Locker::find((int) $request->input('locker_id', 0));
+        if (!$locker) {
+            throw new HttpException(404, 'Locker not found');
+        }
+        $slot = (int) $request->input('slot', 0);
+        $slots = array_values(array_filter(array_map('intval', explode(',', (string) $locker->alert_slots))));
+        if ($request->boolean('cleared')) {
+            $slots = array_values(array_diff($slots, [$slot]));
+        } elseif (!in_array($slot, $slots, true)) {
+            $slots[] = $slot;
+        }
+        if (!$slots) {
+            $locker->update(['alert_slots' => null, 'alert' => null, 'alert_at' => null]);
+            return response()->json(['ok' => true, 'alert' => null]);
+        }
+        sort($slots);
+
+        // Who was at the door: the most recent command for this locker.
+        $cmd = DeviceCommand::where('locker_id', $locker->id)->orderByDesc('id')->first();
+        $student = $cmd ? Student::find($cmd->student_id) : null;
+        $text = (count($slots) > 1 ? 'Slots ' . implode(', ', $slots) : 'Slot ' . $slots[0])
+            . ' moved without a tag scan — a tool may be out unrecorded'
+            . ($student ? ' · ' . $student->name . ' (' . $student->student_no . ') was at the door' : '');
+
+        $locker->update([
+            'alert_slots' => implode(',', $slots),
+            'alert' => mb_substr($text, 0, 160),
+            'alert_at' => $locker->alert_at ?: Carbon::now(),
+        ]);
+        return response()->json(['ok' => true, 'alert' => $locker->alert]);
     }
 
     // --- Immediate borrow/return (simulator / direct tests) ----------------- //

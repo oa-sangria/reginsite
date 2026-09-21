@@ -100,6 +100,8 @@ Mega 2 (*not built yet*): cabinets 6–8 use 22/23…44/45 as above; cabinet 9 =
       (~15 mA each; 20 sensors ≈ 300 mA peak)
 - ☐ Every slot returns an echo in `USS` (a `none` slot is ignored by detection); lifting a tool
       shows `d=` past ±2.0 and `changed=1` in the `#slot` stream
+- ☐ Lift + tag one tool AND take a second → `ALERT,<cab>,<slot>` within ~2 s, buzzer alarm, kiosk
+      strip, dashboard card red; put it back → `CLEAR`, alarm stops. Reaching past a slot does NOT alert.
 - ☐ RC522: `SELFTEST` shows `v=0x92`/`0x91` + `antenna ON` **before and after** ten solenoid cycles
 - ☐ RC522: 10–100 µF across VCC/GND at the module; SPI leads as short as the mounting allows
 - ☐ RC522 antenna is not beside an energised solenoid or the relay-board wiring

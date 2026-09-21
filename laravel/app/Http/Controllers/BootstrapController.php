@@ -56,6 +56,10 @@ class BootstrapController extends Controller
                 'occupancy' => $l->occupancy,
                 'led' => $l->led,
                 'lastSeen' => $iso($l->last_seen),
+                // Untagged removal flagged by the slot sensors (null = none).
+                'alert' => $l->alert,
+                'alertSlots' => $l->alert_slots ? array_map('intval', explode(',', $l->alert_slots)) : [],
+                'alertAt' => $iso($l->alert_at),
             ]),
             'transactions' => Transaction::orderByDesc('borrow_time')->get()->map(fn ($t) => [
                 'id' => 'TXN-' . $t->id,

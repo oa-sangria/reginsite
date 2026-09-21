@@ -105,7 +105,9 @@ window.App = (function () {
       overdue: DB.transactions.filter(function (t) { return t.status === "overdue"; }).length,
       banned: DB.students.filter(function (s) { return s.status === "banned"; }).length,
       maintenance: DB.tools.filter(function (t) { return t.status === "maintenance"; }).length,
-      lockersOffline: DB.lockers.filter(function (l) { return l.sensor === "offline"; }).length
+      lockersOffline: DB.lockers.filter(function (l) { return l.sensor === "offline"; }).length,
+      // Slot sensors saw a tool leave with no tag scan (see lockers[].alert).
+      untagged: DB.lockers.filter(function (l) { return !!l.alert; }).length
     };
   }
   // Flatten transactions into individual borrow/return events (newest first).

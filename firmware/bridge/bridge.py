@@ -14,6 +14,10 @@ Loop:
   * Read the Mega:  DONE,<locker>,<uid>,<slot> -> POST /api/esp32/confirm {command_id, uid, slot}
                     TIMEOUT,<locker>           -> POST /api/esp32/confirm {command_id, timeout:true, reason}
                     NOWIRE,<locker>            -> same, reason "nowire"
+                    FAULT,<locker>,<why>       -> same, reason "fault"
+                    ALERT,<locker>,<slot>      -> POST /api/esp32/locker-alert {locker_id, slot}
+                                                  (a tool left without a tag; the Mega is alarming)
+                    CLEAR,<locker>,<slot>      -> same, cleared:true (it was put back)
 
 Two controllers: this ONE process owns both COM ports (serial_ports = COM5, COM8).
 Each board announces "READY,<id>" plus a "#... controller=N cabinets=lo-hi" banner
@@ -53,6 +57,8 @@ RETRY_FOR = 600.0       # keep retrying an undeliverable confirm for 10 minutes
 TAG_WAIT_S = OPEN_WINDOW_S
                         # a reader-less board's DONE waits this long for the tag
                         # to be tapped on controller 1's reader before giving up
+ALARM_S = 30            # how long controller 1's buzzer sounds for a controller-2
+                        # ALERT (its own alerts use ALARM_MS in the sketch)
 
 
 def load_config():
@@ -273,6 +279,11 @@ def main():
         student cannot hear a beep before the kiosk asked for a tap)."""
         rb = reader_board()
         if rb is None:
+            # No reader board right now. When it comes back it has been reset
+            # (opening the port toggles DTR) and its idle scan is at the bench
+            # default again — forget what we last told it, so the next pass
+            # re-sends IDLESCAN,1 if a reader-less door is still open.
+            idle_state["on"] = None
             return
         want = bool(pending_tag) or any(e[2].rfid is False for e in outstanding.values())
         if want and idle_state["on"] is not True:
@@ -291,23 +302,28 @@ def main():
         ok, data = post_confirm(payload, f"confirm cmd {cid} uid {uid}")
         report_confirm(ok, data, "confirm")
 
-    # Confirms the server could not be reached for. The Mega has already
-    # relocked by the time we post a confirm, so the physical side is settled
-    # and the only thing at stake is the DATABASE ROW — a borrow that happened
-    # but was never written. Retried once a second until the server answers,
-    # for up to RETRY_FOR; the server's terminal-state guard makes a duplicate
-    # delivery harmless. Entries: [payload, label, first_attempt_ts].
+    # Posts the server could not be reached for: confirms, and locker alerts.
+    # The Mega has already relocked by the time we post a confirm, so the
+    # physical side is settled and the only thing at stake is the DATABASE ROW
+    # — a borrow that happened but was never written, or a tool that left
+    # without a tag and nobody told. Retried once a second until the server
+    # answers, for up to RETRY_FOR; the server's terminal-state guard makes a
+    # duplicate confirm harmless and alerts are idempotent by slot.
+    # Entries: [path, payload, label, first_attempt_ts].
     unsent = deque()
 
-    def post_confirm(payload, label):
-        """POST confirm; on a transport failure queue it for retry.
+    def post_queued(path, payload, label):
+        """POST to `path`; on a transport failure queue it for retry.
         Returns (ok, data) exactly like api(); None means 'queued'."""
-        ok, data = api(cfg, "POST", "confirm", payload)
+        ok, data = api(cfg, "POST", path, payload)
         if ok is None:
-            unsent.append([payload, label, time.time()])
+            unsent.append([path, payload, label, time.time()])
             print(f"  -> server unreachable ({data}); {label} queued for retry "
                   f"({len(unsent)} waiting)")
         return ok, data
+
+    def post_confirm(payload, label):
+        return post_queued("confirm", payload, label)
 
     def report_confirm(ok, data, label):
         if ok:
@@ -329,18 +345,50 @@ def main():
         """One pass over the retry queue, oldest first. Stops at the first
         transport failure (server is still down — no point hammering)."""
         while unsent:
-            payload, label, first = unsent[0]
+            path, payload, label, first = unsent[0]
             if time.time() - first > RETRY_FOR:
                 unsent.popleft()
                 print(f"  !! GAVE UP after {int(RETRY_FOR)}s: {label} {json.dumps(payload)}"
                       f"  <- enter this manually if it was a real borrow/return")
                 continue
-            ok, data = api(cfg, "POST", "confirm", payload)
+            ok, data = api(cfg, "POST", path, payload)
             if ok is None:
                 return
             unsent.popleft()
             print(f"  -> retry delivered after {int(time.time() - first)}s:")
-            report_confirm(ok, data, label)
+            if path == "confirm":
+                report_confirm(ok, data, label)
+            else:
+                print(f"  -> {label}: {'ok' if ok else data}")
+
+    # --- untagged removals ---------------------------------------------------
+    # ALERT,<cab>,<slot>: a slot other than the one the window was about moved
+    # — a tool left without a tag (or after a TIMEOUT, with no record at all).
+    # The Mega with the buzzer is already alarming; controller 2 has no buzzer,
+    # so its alerts are relayed to controller 1 as ALARM,<s>. The server marks
+    # the locker so the dashboard and the kiosk show it; CLEAR undoes that when
+    # the slot reads back at its baseline.
+    alerts = set()        # (board name, locker, slot) currently out
+
+    def locker_alert(board, locker, slot, cleared):
+        key = (board.name, int(locker), int(slot))
+        if cleared:
+            alerts.discard(key)
+        else:
+            alerts.add(key)
+        verb = "back in place" if cleared else "LEFT WITHOUT A TAG"
+        print(f"  !! locker {locker} slot {slot}: tool {verb}" + ("" if cleared else " — alarm"))
+        payload = {"locker_id": int(locker), "slot": int(slot), "cleared": cleared}
+        ok, data = post_queued("locker-alert", payload,
+                               f"{'clear' if cleared else 'alert'} locker {locker} slot {slot}")
+        if ok is False:
+            print(f"  -> locker-alert rejected: {data}")
+        # Sound (or silence) the buzzer for a board that has none of its own.
+        if board.rfid is False:
+            rb = reader_board()
+            if rb:
+                remote = any(b_name != rb.name for b_name, _, _ in alerts)
+                rb.write(f"ALARM,{int(ALARM_S) if remote else 0}")
 
     def progress(locker, stage):
         """Relay a mid-window event (tag read / tool moved) for the kiosk to
@@ -439,6 +487,25 @@ def main():
                 post_confirm({"command_id": cid, "timeout": True, "reason": "nowire"},
                              f"nowire cmd {cid}")
             print(f"  -> locker {locker} is NOT on {board.name}; cancelled.")
+
+        elif line.startswith("FAULT,"):
+            # FAULT,<locker>,<why> — the board refused to open (a reader-less
+            # cabinet whose sensors gave no echo: nothing could confirm a
+            # pickup). Cancel so the kiosk says so instead of waiting.
+            parts = (line.split(",") + ["", ""])[1:3]
+            locker, why = parts[0], parts[1] or "fault"
+            cid = pending(locker)
+            if cid:
+                resolve(locker)
+                post_confirm({"command_id": cid, "timeout": True, "reason": "fault"},
+                             f"fault cmd {cid}")
+            print(f"  -> locker {locker} refused to open on {board.name} ({why}); cancelled.")
+
+        elif line.startswith("ALERT,") or line.startswith("CLEAR,"):
+            # ALERT,<locker>,<slot> / CLEAR,<locker>,<slot> — see locker_alert().
+            parts = (line.split(",") + ["", ""])[1:3]
+            if parts[0].isdigit() and parts[1].isdigit():
+                locker_alert(board, parts[0], parts[1], line.startswith("CLEAR,"))
 
     def inject_hook():
         # --- TEMPORARY BRING-UP TEST HOOK ------------------------------------
